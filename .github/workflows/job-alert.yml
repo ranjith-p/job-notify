@@ -4,7 +4,10 @@ on:
   schedule:
     # Every 10 minutes, offset from round numbers to avoid GitHub's
     # peak-load scheduling delays at :00, :10, :20, etc.
-    - cron: "3,13,23,33,43,53 * * * *"
+    # Restricted to hours 7-20 UTC = ~9am-11pm CEST (Berlin summer time).
+    # NOTE: when Germany switches to CET in late October, shift this to
+    # "6-19" to keep the same local 9am-11pm window.
+    - cron: "3,13,23,33,43,53 7-20 * * *"
   workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
 
 # Ensures only one run of this workflow executes at a time. If a manual
