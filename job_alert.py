@@ -15,6 +15,7 @@ between runs (the GitHub Actions workflow commits these back to the repo).
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -45,6 +46,33 @@ KEYWORDS = [
     "data analyst",
 ]
 
+# Title keywords that mean "skip this" — internships / working-student /
+# similar non-full-employee roles. Word-boundary matched so "intern"
+# doesn't false-match inside "international".
+EXCLUDE_TITLE_PATTERNS = [
+    r"\bpraktikum\b",
+    r"\bpraktikant\w*\b",
+    r"\bwerkstudent\w*\b",
+    r"\bintern\b",
+    r"\binternship\b",
+    r"\bworking student\b",
+]
+_EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
+
+# German-language-requirement exclusion. Deliberately TIGHT proximity
+# matching: only excludes when a level word (C1/C2/fluent/native/etc.)
+# sits immediately next to "German"/"Deutsch" — not just anywhere in the
+# same text. This avoids false positives like "English C1, German B2"
+# (where the C1 belongs to English, not German).
+_LEVEL_WORDS = r"(?:c1|c2|fluent\w*|nativ\w*|muttersprach\w*|verhandlungssicher\w*)"
+_LANG_WORDS = r"(?:german|deutsch\w*)"
+_GAP = r"[\s:()\-]{0,5}"  # allowed separators between language & level — NOT commas
+_GERMAN_LEVEL_RE = re.compile(
+    rf"\b{_LANG_WORDS}\b{_GAP}\b{_LEVEL_WORDS}\b"
+    rf"|\b{_LEVEL_WORDS}\b{_GAP}\b{_LANG_WORDS}\b",
+    re.IGNORECASE,
+)
+
 # How many recent IDs to remember per search, as a tie-break safety net
 RECENT_ID_CAP = 50
 
@@ -65,6 +93,21 @@ SEARCHES = {
         "state_file": STATE_DIR / "berlin.json",
     },
 }
+
+
+def should_exclude(job: dict) -> str | None:
+    """Return a short reason string if the job should be skipped, else None."""
+    title = job.get("title", "")
+    description = job.get("description", "")
+    combined = f"{title} {description}"
+
+    if _EXCLUDE_TITLE_RE.search(title):
+        return "internship/working-student role"
+
+    if _GERMAN_LEVEL_RE.search(combined):
+        return "requires German C1+/fluent/native"
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +144,7 @@ def fetch_jobs(location: str | None) -> list[dict]:
             "app_key": ADZUNA_APP_KEY,
             "results_per_page": RESULTS_PER_PAGE,
             "what_phrase": keyword,
+            "full_time": 1,
             "sort_by": "date",
             "content-type": "application/json",
         }
@@ -162,6 +206,7 @@ def parse_iso(ts: str) -> datetime:
 
 def run_search(name: str, cfg: dict) -> None:
     state = load_state(cfg["state_file"])
+    print(f"[{name}] DEBUG loaded state from {cfg['state_file']}: {state}")
     last_seen = parse_iso(state["last_seen_iso"])
     recent_ids = set(state["recent_ids"])
 
@@ -183,10 +228,16 @@ def run_search(name: str, cfg: dict) -> None:
         is_new_by_id = job_id not in recent_ids
 
         if is_new_by_time and is_new_by_id:
-            new_jobs.append(job)
             recent_ids.add(job_id)
             if created > newest_iso:
                 newest_iso = created
+
+            exclude_reason = should_exclude(job)
+            if exclude_reason:
+                print(f"[{name}] Skipped ({exclude_reason}): {job.get('title')}")
+                continue
+
+            new_jobs.append(job)
 
     for job in new_jobs:
         send_telegram(cfg["label"], job)
@@ -198,10 +249,13 @@ def run_search(name: str, cfg: dict) -> None:
     ordered_recent = [str(j["id"]) for j in jobs if str(j.get("id")) in recent_ids]
     trimmed = ordered_recent[:RECENT_ID_CAP] if ordered_recent else list(recent_ids)[:RECENT_ID_CAP]
 
-    save_state(cfg["state_file"], {
+    new_state = {
         "last_seen_iso": newest_iso,
         "recent_ids": trimmed,
-    })
+    }
+    print(f"[{name}] DEBUG about to write state: {new_state}")
+    save_state(cfg["state_file"], new_state)
+    print(f"[{name}] DEBUG state file now on disk: {cfg['state_file'].read_text()}")
 
     if not new_jobs:
         print(f"[{name}] No new jobs this run.")
