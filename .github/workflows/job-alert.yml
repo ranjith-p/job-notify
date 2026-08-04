@@ -38,5 +38,13 @@ jobs:
           git config user.name "job-alert-bot"
           git config user.email "actions@github.com"
           git add state/
-          git diff --cached --quiet || git commit -m "Update job alert state [skip ci]"
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+          git commit -m "Update job alert state [skip ci]"
+          # Pull any commits that landed since checkout (e.g. a manual
+          # push you made) before pushing, so this doesn't fail on a
+          # non-fast-forward race.
+          git pull --rebase origin main
           git push
