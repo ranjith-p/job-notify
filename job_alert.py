@@ -42,6 +42,7 @@ KEYWORDS = [
     "applied scientist",
     "research scientist",
     "data analyst",
+    'analyst'
 ]
 
 # How many recent IDs to remember per search, as a tie-break safety net
