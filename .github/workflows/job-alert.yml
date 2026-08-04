@@ -7,6 +7,13 @@ on:
     - cron: "3,13,23,33,43,53 * * * *"
   workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
 
+# Ensures only one run of this workflow executes at a time. If a manual
+# trigger and a scheduled tick land close together, the second one waits
+# for the first to finish (including its push) instead of racing it.
+concurrency:
+  group: job-alert-state
+  cancel-in-progress: false
+
 permissions:
   contents: write  # needed so the workflow can commit updated state files
 
