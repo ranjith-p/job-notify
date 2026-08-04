@@ -13,6 +13,7 @@ State is stored in state/germany.json and state/berlin.json so it persists
 between runs (the GitHub Actions workflow commits these back to the repo).
 """
 
+import html
 import json
 import os
 import re
@@ -175,11 +176,14 @@ def send_telegram(label: str, job: dict) -> None:
     if salary_min and salary_max:
         salary_line = f"\n💰 {salary_min:,.0f}–{salary_max:,.0f}"
 
+    # HTML parse mode + explicit escaping is far more robust than Telegram's
+    # legacy Markdown, which breaks (400 error) on unescaped *, _, [, ], (, )
+    # etc. — all common in job titles like "(all genders)" or "AI/ML".
     text = (
-        f"{label} — New role\n\n"
-        f"*{title}*\n"
-        f"{company} · {location}{salary_line}\n\n"
-        f"{url}"
+        f"{html.escape(label)} — New role\n\n"
+        f"<b>{html.escape(title)}</b>\n"
+        f"{html.escape(company)} · {html.escape(location)}{salary_line}\n\n"
+        f"{html.escape(url)}"
     )
 
     api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -188,7 +192,7 @@ def send_telegram(label: str, job: dict) -> None:
         json={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": text,
-            "parse_mode": "Markdown",
+            "parse_mode": "HTML",
             "disable_web_page_preview": False,
         },
         timeout=15,
@@ -240,8 +244,17 @@ def run_search(name: str, cfg: dict) -> None:
             new_jobs.append(job)
 
     for job in new_jobs:
-        send_telegram(cfg["label"], job)
-        print(f"[{name}] Sent alert: {job.get('title')}")
+        try:
+            send_telegram(cfg["label"], job)
+            print(f"[{name}] Sent alert: {job.get('title')}")
+        except Exception as exc:  # noqa: BLE001
+            # Critical: never let one bad message crash the whole run —
+            # that would skip save_state() below and reset the cursor to
+            # square one, causing every job to be resent next run. Log and
+            # move on; the cursor still advances since recent_ids/newest_iso
+            # were already updated in the filtering loop above.
+            print(f"[{name}] ERROR sending Telegram message for "
+                  f"'{job.get('title')}': {exc}", file=sys.stderr)
 
     # Trim recent_ids to the cap (keep most recently added — since sets
     # don't preserve order, just cap by re-deriving from the current jobs
