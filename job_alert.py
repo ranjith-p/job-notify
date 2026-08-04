@@ -16,6 +16,7 @@ between runs (the GitHub Actions workflow commits these back to the repo).
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,7 +43,6 @@ KEYWORDS = [
     "applied scientist",
     "research scientist",
     "data analyst",
-    'analyst'
 ]
 
 # How many recent IDs to remember per search, as a tie-break safety net
@@ -82,22 +82,41 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def fetch_jobs(location: str | None) -> list[dict]:
-    """Query Adzuna for the keyword list, sorted newest-first."""
-    url = f"https://api.adzuna.com/v1/api/jobs/{ADZUNA_COUNTRY}/search/1"
-    params = {
-        "app_id": ADZUNA_APP_ID,
-        "app_key": ADZUNA_APP_KEY,
-        "results_per_page": RESULTS_PER_PAGE,
-        "what_or": " ".join(KEYWORDS),  # OR search across keyword list
-        "sort_by": "date",
-        "content-type": "application/json",
-    }
-    if location:
-        params["where"] = location
+    """
+    Query Adzuna once per keyword phrase (exact-phrase match) and merge
+    the results, deduped by job ID, sorted newest first.
 
-    resp = requests.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json().get("results", [])
+    Note: Adzuna's `what_or` parameter ORs individual *words*, not
+    phrases — passing multi-word keywords through it causes false
+    matches on any single word (e.g. "engineer" alone). Querying each
+    phrase separately with `what_phrase` avoids that.
+    """
+    url = f"https://api.adzuna.com/v1/api/jobs/{ADZUNA_COUNTRY}/search/1"
+    seen_ids = set()
+    merged: list[dict] = []
+
+    for keyword in KEYWORDS:
+        params = {
+            "app_id": ADZUNA_APP_ID,
+            "app_key": ADZUNA_APP_KEY,
+            "results_per_page": RESULTS_PER_PAGE,
+            "what_phrase": keyword,
+            "sort_by": "date",
+            "content-type": "application/json",
+        }
+        if location:
+            params["where"] = location
+
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        for job in resp.json().get("results", []):
+            job_id = str(job.get("id"))
+            if job_id and job_id not in seen_ids:
+                seen_ids.add(job_id)
+                merged.append(job)
+        time.sleep(0.3)  # be polite to Adzuna's rate limits
+
+    return merged
 
 
 def send_telegram(label: str, job: dict) -> None:
