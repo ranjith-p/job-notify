@@ -2,9 +2,9 @@ name: Data Science Job Alert
 
 on:
   schedule:
-    # Every 10 minutes. GitHub may delay this slightly under load — that's
-    # normal and fine for this use case.
-    - cron: "*/10 * * * *"
+    # Every 10 minutes, offset from round numbers to avoid GitHub's
+    # peak-load scheduling delays at :00, :10, :20, etc.
+    - cron: "3,13,23,33,43,53 * * * *"
   workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
 
 permissions:
