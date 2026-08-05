@@ -339,8 +339,12 @@ def score_job_match(job: dict, description: str) -> dict:
         '"<the required years of experience exactly as stated in the posting, '
         'e.g. \'5+ years\', \'1-3 years\', \'3+ years\'; or \'Not mentioned\' '
         'if the posting doesn\'t state a specific requirement>"}\n'
-        "Base match_score on how well the job aligns with the candidate's "
-        "actual experience and target roles — not just keyword overlap."
+        "Base match_score and match_reason ONLY on how well the job aligns "
+        "with the candidate's actual skills, experience, and target roles — "
+        "not just keyword overlap. Do NOT factor the German language "
+        "requirement into match_score or match_reason in any way — language "
+        "is reported separately in german_requirement and must not affect "
+        "or be mentioned in the other two fields."
     )
     user_prompt = (
         f"CANDIDATE PROFILE:\n{CANDIDATE_PROFILE}\n\n"
