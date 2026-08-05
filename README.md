@@ -19,6 +19,19 @@ your first run and set `last_seen_iso` to right now, e.g.
 2. Once approved, your dashboard shows an `App ID` and `App Key`.
 3. Keep both handy for step 3.
 
+## 1b. Get a free Groq API key (for job match scoring)
+
+1. Go to https://console.groq.com/ and sign up (free tier available).
+2. Create an API key from the dashboard.
+3. Keep it handy for step 4.
+
+Groq scores each new job against your profile (edit `CANDIDATE_PROFILE`
+in `job_alert.py` to update it) and extracts the actual German language
+requirement from the job description, both shown in the Telegram message.
+Uses `openai/gpt-oss-20b` — fast and cheap. If scoring fails for a given
+job (rate limit, API hiccup, etc.), the job is still sent — just without
+a score line — rather than being dropped or blocking the run.
+
 ## 2. Create a Telegram bot and get your chat ID
 
 1. In Telegram, message **@BotFather** → `/newbot` → follow the prompts.
@@ -45,15 +58,58 @@ Add these four:
 |---|---|
 | `ADZUNA_APP_ID` | from step 1 |
 | `ADZUNA_APP_KEY` | from step 1 |
+| `GROQ_API_KEY` | from step 1b |
 | `TELEGRAM_BOT_TOKEN` | from step 2 |
 | `TELEGRAM_CHAT_ID` | from step 2 |
 
 ## 5. Enable the workflow
 
 Go to the **Actions** tab in your repo → you should see "Data Science Job
-Alert" → click **Enable workflow** if prompted. It will now run every
-10 minutes automatically. You can also trigger a manual run any time via
-**Actions → Data Science Job Alert → Run workflow**.
+Alert" → click **Enable workflow** if prompted.
+
+## 6. Set up the external scheduler (cron-job.org)
+
+GitHub's own native `schedule:` cron trigger proved unreliable in testing
+— it would silently stop firing for many hours at a time, especially
+after any edit to the workflow file. `workflow_dispatch` (manual runs),
+on the other hand, fired instantly and reliably every single time. So
+instead of depending on GitHub's scheduler, we use a free external cron
+service to call `workflow_dispatch` via GitHub's API every 10 minutes.
+
+**Step A — create a GitHub Personal Access Token (PAT):**
+
+1. Go to https://github.com/settings/personal-access-tokens/new
+2. Give it a name like `job-alert-dispatch`.
+3. Under "Repository access," select **Only select repositories** →
+   choose `job-notify`.
+4. Under "Permissions" → "Repository permissions" → set **Actions** to
+   **Read and write**.
+5. Generate the token and copy it somewhere safe — you won't see it
+   again. Treat it like a password.
+
+**Step B — set up cron-job.org:**
+
+1. Go to https://cron-job.org/ and create a free account.
+2. Create a new cron job with these settings:
+   - **URL**:
+     `https://api.github.com/repos/ranjith-p/job-notify/actions/workflows/job-alert.yml/dispatches`
+   - **Request method**: POST
+   - **Headers**:
+     - `Authorization: Bearer <your PAT from step A>`
+     - `Accept: application/vnd.github+json`
+     - `Content-Type: application/json`
+   - **Body**: `{"ref":"main"}`
+   - **Schedule**: every 10 minutes, restricted to your active hours
+     (cron-job.org supports timezone-aware schedules — set it to
+     `Europe/Berlin`, active 9:00–23:00, so it handles daylight saving
+     automatically without any manual UTC math).
+3. Save and enable the job. cron-job.org shows execution history, so you
+   can confirm it's actually firing and see GitHub's response.
+
+The "Check active hours" step still exists inside the workflow itself as
+a redundant safety net (in case the external schedule ever misfires
+outside your intended hours), but the real scheduling now lives in
+cron-job.org, not GitHub.
 
 ## Tuning it
 
