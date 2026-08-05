@@ -1,16 +1,17 @@
 """
 Data science job alert bot.
 
-Runs two searches against the Adzuna API:
-  1. Germany-wide
-  2. Berlin-only
+Fetches Germany-wide AND Berlin-scoped Adzuna results (the Berlin-specific
+query catches listings that fall outside the top-50-per-keyword cutoff on
+the broader Germany-wide query), merges them into a single deduped list,
+and runs ONE unified new/seen cursor across everything. Each job is
+scored and sent exactly once, labeled 🇩🇪 Germany or 📍 Berlin based on
+its actual location — this avoids the double-scoring/double-sending that
+happened when Germany and Berlin were tracked as two independent searches
+with separate state.
 
-For each, finds jobs newer than the last run (using a timestamp cursor +
-a small rolling set of recently-seen IDs as a safety net against ties/reposts)
-and sends a Telegram message for each new listing.
-
-State is stored in state/germany.json and state/berlin.json so it persists
-between runs (the GitHub Actions workflow commits these back to the repo).
+State is stored in state/combined.json so it persists between runs (the
+GitHub Actions workflow commits this back to the repo).
 """
 
 import html
@@ -96,26 +97,29 @@ EXCLUDE_TITLE_PATTERNS = [
 ]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
-# How many recent IDs to remember per search, as a tie-break safety net
-RECENT_ID_CAP = 50
+# How many recent IDs to remember, as a tie-break safety net
+RECENT_ID_CAP = 100
 
 # Results per page to pull each run (Adzuna max is 50)
 RESULTS_PER_PAGE = 50
 
 STATE_DIR = Path(__file__).parent / "state"
+STATE_FILE = STATE_DIR / "combined.json"
 
-SEARCHES = {
-    "germany": {
-        "label": "🇩🇪 Germany",
-        "location": None,  # no 'where' filter = whole country
-        "state_file": STATE_DIR / "germany.json",
-    },
-    "berlin": {
-        "label": "📍 Berlin",
-        "location": "Berlin",
-        "state_file": STATE_DIR / "berlin.json",
-    },
-}
+# We still query both scopes — Germany-wide AND Berlin-specific — because
+# a broad nationwide query can push Berlin listings outside the
+# top-50-per-keyword cutoff when there's a lot of nationwide volume, while
+# the Berlin-scoped query (smaller pool) still catches them. Both feed
+# into ONE merged, deduped list below.
+FETCH_LOCATIONS = [None, "Berlin"]  # None = no 'where' filter = whole country
+
+
+def label_for_job(job: dict) -> str:
+    """Pick the display label based on the job's actual location."""
+    display_name = job.get("location", {}).get("display_name", "")
+    if "berlin" in display_name.lower():
+        return "📍 Berlin"
+    return "🇩🇪 Germany"
 
 
 def should_exclude(job: dict) -> str | None:
@@ -201,14 +205,19 @@ def send_telegram(label: str, job: dict, match: dict) -> None:
 
     salary_line = ""
     if salary_min and salary_max:
-        salary_line = f"\n💰 {salary_min:,.0f}–{salary_max:,.0f}"
+        salary_line = f"\n\n💰 {salary_min:,.0f}–{salary_max:,.0f}"
 
     score = match.get("match_score")
     score_line = ""
     if score:
-        score_line = f"\n🎯 Match: {html.escape(str(score))}/10 — {html.escape(match.get('match_reason', ''))}"
+        score_line = f"\n\n🎯 Match: {html.escape(str(score))}/10 — {html.escape(match.get('match_reason', ''))}"
 
-    german_line = f"\n🇩🇪 German: {html.escape(match.get('german_requirement', 'Not mentioned'))}"
+    german_line = f"\n\n🇩🇪 German: {html.escape(match.get('german_requirement', 'Not mentioned'))}"
+
+    exp = match.get("years_experience", "Not mentioned")
+    exp_line = ""
+    if exp and exp.lower() != "not mentioned":
+        exp_line = f"\n\n📅 Experience: {html.escape(exp)}"
 
     # HTML parse mode + explicit escaping is far more robust than Telegram's
     # legacy Markdown, which breaks (400 error) on unescaped *, _, [, ], (, )
@@ -217,7 +226,7 @@ def send_telegram(label: str, job: dict, match: dict) -> None:
         f"{html.escape(label)} — New role\n\n"
         f"<b>{html.escape(title)}</b>\n"
         f"{html.escape(company)} · {html.escape(location)}{salary_line}"
-        f"{score_line}{german_line}\n\n"
+        f"{score_line}{german_line}{exp_line}\n\n"
         f"{html.escape(url)}"
     )
 
@@ -262,7 +271,10 @@ def score_job_match(job: dict) -> dict:
         'sentence, under 20 words, on why this score>", "german_requirement": '
         '"<one short phrase describing the German language requirement, e.g. '
         '\'Not mentioned\', \'Not mandatory, English OK\', \'B2 required\', '
-        '\'C1 fluent required for client communication\'>"}\n'
+        '\'C1 fluent required for client communication\'>", "years_experience": '
+        '"<the required years of experience exactly as stated in the posting, '
+        'e.g. \'5+ years\', \'1-3 years\', \'3+ years\'; or \'Not mentioned\' '
+        'if the posting doesn\'t state a specific requirement>"}\n'
         "Base match_score on how well the job aligns with the candidate's "
         "actual experience and target roles — not just keyword overlap."
     )
@@ -302,6 +314,7 @@ def score_job_match(job: dict) -> dict:
         "match_score": int(parsed.get("match_score", 0)),
         "match_reason": str(parsed.get("match_reason", "")).strip(),
         "german_requirement": str(parsed.get("german_requirement", "Not mentioned")).strip(),
+        "years_experience": str(parsed.get("years_experience", "Not mentioned")).strip(),
     }
 
 
@@ -309,16 +322,24 @@ def score_job_match(job: dict) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
-def run_search(name: str, cfg: dict) -> None:
-    state = load_state(cfg["state_file"])
-    print(f"[{name}] DEBUG loaded state from {cfg['state_file']}: {state}")
+def run() -> None:
+    state = load_state(STATE_FILE)
+    print(f"DEBUG loaded state from {STATE_FILE}: {state}")
     last_seen = parse_iso(state["last_seen_iso"])
     recent_ids = set(state["recent_ids"])
 
-    jobs = fetch_jobs(cfg["location"])
+    # Fetch both scopes and merge into one deduped list, keyed by job id —
+    # this is what makes a Berlin job (which matches both queries) get
+    # processed exactly once instead of twice.
+    all_jobs: dict[str, dict] = {}
+    for location in FETCH_LOCATIONS:
+        for job in fetch_jobs(location):
+            job_id = str(job.get("id"))
+            if job_id:
+                all_jobs.setdefault(job_id, job)
+    jobs = list(all_jobs.values())
+    print(f"DEBUG merged {len(jobs)} unique jobs across both scopes")
 
-    # Adzuna already sorts by date desc; walk oldest->newest for correct
-    # cursor progression, but only act on genuinely new ones.
     new_jobs = []
     newest_iso = state["last_seen_iso"]
 
@@ -339,24 +360,27 @@ def run_search(name: str, cfg: dict) -> None:
 
             exclude_reason = should_exclude(job)
             if exclude_reason:
-                print(f"[{name}] Skipped ({exclude_reason}): {job.get('title')}")
+                print(f"Skipped ({exclude_reason}): {job.get('title')}")
                 continue
 
             new_jobs.append(job)
 
     for job in new_jobs:
+        label = label_for_job(job)
+
         try:
             match = score_job_match(job)
         except Exception as exc:  # noqa: BLE001
             # A scoring failure should never block the job from being sent
             # or block state persistence — fall back to no score shown.
-            print(f"[{name}] WARNING scoring failed for "
-                  f"'{job.get('title')}': {exc}", file=sys.stderr)
-            match = {"match_score": None, "match_reason": "", "german_requirement": "Unknown"}
+            print(f"WARNING scoring failed for '{job.get('title')}': {exc}",
+                  file=sys.stderr)
+            match = {"match_score": None, "match_reason": "",
+                     "german_requirement": "Unknown", "years_experience": "Not mentioned"}
 
         try:
-            send_telegram(cfg["label"], job, match)
-            print(f"[{name}] Sent alert: {job.get('title')} "
+            send_telegram(label, job, match)
+            print(f"Sent alert ({label}): {job.get('title')} "
                   f"(match={match.get('match_score')})")
         except Exception as exc:  # noqa: BLE001
             # Critical: never let one bad message crash the whole run —
@@ -364,7 +388,7 @@ def run_search(name: str, cfg: dict) -> None:
             # square one, causing every job to be resent next run. Log and
             # move on; the cursor still advances since recent_ids/newest_iso
             # were already updated in the filtering loop above.
-            print(f"[{name}] ERROR sending Telegram message for "
+            print(f"ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Groq's rate limits
 
@@ -378,23 +402,20 @@ def run_search(name: str, cfg: dict) -> None:
         "last_seen_iso": newest_iso,
         "recent_ids": trimmed,
     }
-    print(f"[{name}] DEBUG about to write state: {new_state}")
-    save_state(cfg["state_file"], new_state)
-    print(f"[{name}] DEBUG state file now on disk: {cfg['state_file'].read_text()}")
+    print(f"DEBUG about to write state: {new_state}")
+    save_state(STATE_FILE, new_state)
+    print(f"DEBUG state file now on disk: {STATE_FILE.read_text()}")
 
     if not new_jobs:
-        print(f"[{name}] No new jobs this run.")
+        print("No new jobs this run.")
 
 
 def main() -> None:
     STATE_DIR.mkdir(exist_ok=True)
-    for name, cfg in SEARCHES.items():
-        try:
-            run_search(name, cfg)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[{name}] ERROR: {exc}", file=sys.stderr)
-            # Don't let one search's failure kill the other
-            continue
+    try:
+        run()
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
