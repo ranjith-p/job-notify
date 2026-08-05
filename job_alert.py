@@ -208,6 +208,16 @@ _SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.I
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
+# Cap how much fetched page text we send to Groq, to bound token cost.
+# Generous cap since we now anchor extraction to the actual job content
+# (see below) rather than risking it being eaten by page boilerplate.
+MAX_DESCRIPTION_CHARS = 12000
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
 def enrich_description(job: dict) -> str:
     """
     Return the best available job description text. Adzuna's API
@@ -217,9 +227,18 @@ def enrich_description(job: dict) -> str:
     requirements, in particular, tend to live there). So rather than
     gating on a length heuristic that let many truncated-but-not-short
     snippets slip through, we always attempt to fetch the full posting
-    page and use whichever text is longer. Falls back to the original
-    snippet on any failure — this must never raise, since a fetch
-    failure shouldn't block scoring or sending the job.
+    page.
+
+    Naively stripping an entire page to text and taking the first N
+    characters risks the cap being consumed by nav bars, cookie banners,
+    and footers before ever reaching the real job description — so we
+    anchor: locate where the known Adzuna snippet actually appears within
+    the cleaned page text, and extract forward from THAT point, skipping
+    past the boilerplate that usually precedes real content in the DOM.
+
+    Falls back to the original snippet on any failure or if the anchor
+    can't be found — this must never raise, since a fetch failure
+    shouldn't block scoring or sending the job.
     """
     description = job.get("description", "") or ""
     url = job.get("redirect_url", "")
@@ -238,8 +257,23 @@ def enrich_description(job: dict) -> str:
         text = html.unescape(text)
         text = _WHITESPACE_RE.sub(" ", text).strip()
 
-        if len(text) > len(description):
-            return text[:MAX_DESCRIPTION_CHARS]
+        # Anchor on a distinctive slice of the known snippet (skip the
+        # very start, which is often generic like "About the role" —
+        # a slice from partway in is more likely to be unique on the page).
+        anchor = description[50:150].strip() if len(description) > 150 else description.strip()
+        idx = text.find(anchor) if anchor else -1
+
+        if idx != -1:
+            candidate = text[idx:idx + MAX_DESCRIPTION_CHARS]
+            print(f"DEBUG anchor found for '{job.get('title')}' at index {idx}; "
+                  f"extracted {len(candidate)} chars from that point")
+        else:
+            candidate = text[:MAX_DESCRIPTION_CHARS]
+            print(f"DEBUG anchor NOT found for '{job.get('title')}'; "
+                  f"using first {len(candidate)} chars of page instead")
+
+        if len(candidate) > len(description):
+            return candidate
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING full-JD fetch failed for '{job.get('title')}': {exc}",
               file=sys.stderr)
@@ -262,7 +296,10 @@ def send_batch_header(count: int) -> None:
     so it's easy to see where a new run's results begin in the chat
     without checking individual message timestamps."""
     now_berlin = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d %b %Y, %H:%M")
-    text = f"🆕 ——— New batch: {count} new role{'s' if count != 1 else ''} ({now_berlin}) ———"
+    text = (
+        f"🔴🔴🔴 NEW BATCH — {count} ROLE{'S' if count != 1 else ''} 🔴🔴🔴\n"
+        f"{now_berlin}"
+    )
 
     api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     resp = requests.post(
