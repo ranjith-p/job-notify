@@ -258,6 +258,22 @@ def format_posted_time(created: str) -> str:
         return created or "Unknown"
 
 
+def send_batch_header(count: int) -> None:
+    """Send a single divider message marking the start of this run's batch,
+    so it's easy to see where a new run's results begin in the chat
+    without checking individual message timestamps."""
+    now_berlin = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d %b %Y, %H:%M")
+    text = f"🆕 ——— New batch: {count} new role{'s' if count != 1 else ''} ({now_berlin}) ———"
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    resp = requests.post(
+        api_url,
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
 def send_telegram(label: str, job: dict, match: dict) -> None:
     title = job.get("title", "Untitled role")
     company = job.get("company", {}).get("display_name", "Unknown company")
@@ -448,6 +464,13 @@ def run() -> None:
                 continue
 
             new_jobs.append(job)
+
+    if new_jobs:
+        try:
+            send_batch_header(len(new_jobs))
+        except Exception as exc:  # noqa: BLE001
+            # Never let the divider message block the actual job alerts.
+            print(f"WARNING failed to send batch header: {exc}", file=sys.stderr)
 
     for job in new_jobs:
         label = label_for_job(job)
