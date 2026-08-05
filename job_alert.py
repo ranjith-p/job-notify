@@ -108,6 +108,17 @@ def should_exclude(job: dict) -> str | None:
     if _GERMAN_LEVEL_RE.search(combined):
         return "requires German C1+/fluent/native"
 
+    # Adzuna's contract_time/contract_type fields are only populated for a
+    # minority of German listings — requiring full_time=1 silently dropped
+    # every untagged posting too. Instead, only exclude jobs EXPLICITLY
+    # tagged part-time or contract/temporary; untagged jobs (the majority)
+    # are kept rather than assumed to be excluded.
+    if job.get("contract_time") == "part_time":
+        return "explicitly tagged part-time"
+
+    if job.get("contract_type") == "contract":
+        return "explicitly tagged temporary/contract"
+
     return None
 
 
@@ -145,7 +156,6 @@ def fetch_jobs(location: str | None) -> list[dict]:
             "app_key": ADZUNA_APP_KEY,
             "results_per_page": RESULTS_PER_PAGE,
             "what_phrase": keyword,
-            "full_time": 1,
             "sort_by": "date",
             "content-type": "application/json",
         }
