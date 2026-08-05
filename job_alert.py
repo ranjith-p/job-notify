@@ -32,6 +32,42 @@ ADZUNA_APP_ID = os.environ["ADZUNA_APP_ID"]
 ADZUNA_APP_KEY = os.environ["ADZUNA_APP_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+# llama-3.1-8b-instant and llama-3.3-70b-versatile were deprecated by Groq
+# on 2026-06-17. gpt-oss-20b is the recommended fast/cheap replacement.
+GROQ_MODEL = "openai/gpt-oss-20b"
+
+# Condensed from the candidate's full career history — kept short
+# deliberately so each scoring call stays cheap and fast.
+CANDIDATE_PROFILE = """
+Data Scientist with experience spanning banking/fintech, credit risk,
+marketing analytics, geospatial analytics, and applied AI/LLM products.
+
+Key experience:
+- Built ML models for a Fortune 500 US bank to optimize mortgage customer
+  acquisition (propensity modeling, A/B testing, ~15% cost reduction across
+  138M households); production pipeline scoring 300M+ individuals weekly.
+- New-to-credit underwriting models using alternative data, adopted by
+  10+ banks, 5,000+ customer onboardings/month.
+- Retail/banking forecasting (FMCG store sales, ATM transaction volume)
+  using geospatial features, 82-85% forecast accuracy.
+- Enterprise geospatial/location-intelligence SaaS platform: PySpark ETL
+  on 300M+ records, custom geocoding engine (16M+ addresses), used by
+  10+ enterprise clients.
+- Master's thesis: explainable ML (LightGBM + SHAP) on 19.4M HMDA mortgage
+  records combined with 6 national datasets, studying neighborhood
+  mortgage dynamics across interest-rate cycles.
+- Personal project: AI-native adaptive language-learning platform using
+  RAG + LLMs with persistent learner memory.
+- Core skills: Python, ML/predictive modeling, experimentation (A/B
+  testing), feature engineering, PySpark/data engineering, explainable AI
+  (SHAP), geospatial analytics, stakeholder collaboration, product thinking.
+
+Target roles: Data Science, Decision Science, Applied AI/ML, Product
+Analytics, AI Product Development. Currently based in Berlin, Germany.
+""".strip()
 
 # Adzuna country code for Germany
 ADZUNA_COUNTRY = "de"
@@ -60,20 +96,6 @@ EXCLUDE_TITLE_PATTERNS = [
 ]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
-# German-language-requirement exclusion. Deliberately TIGHT proximity
-# matching: only excludes when a level word (C1/C2/fluent/native/etc.)
-# sits immediately next to "German"/"Deutsch" — not just anywhere in the
-# same text. This avoids false positives like "English C1, German B2"
-# (where the C1 belongs to English, not German).
-_LEVEL_WORDS = r"(?:c1|c2|fluent\w*|nativ\w*|muttersprach\w*|verhandlungssicher\w*)"
-_LANG_WORDS = r"(?:german|deutsch\w*)"
-_GAP = r"[\s:()\-]{0,5}"  # allowed separators between language & level — NOT commas
-_GERMAN_LEVEL_RE = re.compile(
-    rf"\b{_LANG_WORDS}\b{_GAP}\b{_LEVEL_WORDS}\b"
-    rf"|\b{_LEVEL_WORDS}\b{_GAP}\b{_LANG_WORDS}\b",
-    re.IGNORECASE,
-)
-
 # How many recent IDs to remember per search, as a tie-break safety net
 RECENT_ID_CAP = 50
 
@@ -99,14 +121,9 @@ SEARCHES = {
 def should_exclude(job: dict) -> str | None:
     """Return a short reason string if the job should be skipped, else None."""
     title = job.get("title", "")
-    description = job.get("description", "")
-    combined = f"{title} {description}"
 
     if _EXCLUDE_TITLE_RE.search(title):
         return "internship/working-student role"
-
-    if _GERMAN_LEVEL_RE.search(combined):
-        return "requires German C1+/fluent/native"
 
     # Adzuna's contract_time/contract_type fields are only populated for a
     # minority of German listings — requiring full_time=1 silently dropped
@@ -174,7 +191,7 @@ def fetch_jobs(location: str | None) -> list[dict]:
     return merged
 
 
-def send_telegram(label: str, job: dict) -> None:
+def send_telegram(label: str, job: dict, match: dict) -> None:
     title = job.get("title", "Untitled role")
     company = job.get("company", {}).get("display_name", "Unknown company")
     location = job.get("location", {}).get("display_name", "Unknown location")
@@ -186,13 +203,21 @@ def send_telegram(label: str, job: dict) -> None:
     if salary_min and salary_max:
         salary_line = f"\n💰 {salary_min:,.0f}–{salary_max:,.0f}"
 
+    score = match.get("match_score")
+    score_line = ""
+    if score:
+        score_line = f"\n🎯 Match: {html.escape(str(score))}/10 — {html.escape(match.get('match_reason', ''))}"
+
+    german_line = f"\n🇩🇪 German: {html.escape(match.get('german_requirement', 'Not mentioned'))}"
+
     # HTML parse mode + explicit escaping is far more robust than Telegram's
     # legacy Markdown, which breaks (400 error) on unescaped *, _, [, ], (, )
     # etc. — all common in job titles like "(all genders)" or "AI/ML".
     text = (
         f"{html.escape(label)} — New role\n\n"
         f"<b>{html.escape(title)}</b>\n"
-        f"{html.escape(company)} · {html.escape(location)}{salary_line}\n\n"
+        f"{html.escape(company)} · {html.escape(location)}{salary_line}"
+        f"{score_line}{german_line}\n\n"
         f"{html.escape(url)}"
     )
 
@@ -212,6 +237,72 @@ def send_telegram(label: str, job: dict) -> None:
 
 def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def score_job_match(job: dict) -> dict:
+    """
+    Ask Groq to score how well this job matches the candidate profile,
+    and to extract the actual German language requirement (if any) as
+    a short human-readable note.
+
+    Returns a dict like:
+        {"match_score": 8, "match_reason": "...", "german_requirement": "..."}
+    On any failure, returns a safe fallback dict rather than raising —
+    callers should never let a scoring failure block sending the job or
+    persisting state.
+    """
+    title = job.get("title", "")
+    description = job.get("description", "")
+
+    system_prompt = (
+        "You are a job-matching assistant. Given a candidate profile and a "
+        "job posting, respond with STRICT JSON only — no markdown, no code "
+        "fences, no extra text — in exactly this schema:\n"
+        '{"match_score": <integer 1-10>, "match_reason": "<one short '
+        'sentence, under 20 words, on why this score>", "german_requirement": '
+        '"<one short phrase describing the German language requirement, e.g. '
+        '\'Not mentioned\', \'Not mandatory, English OK\', \'B2 required\', '
+        '\'C1 fluent required for client communication\'>"}\n'
+        "Base match_score on how well the job aligns with the candidate's "
+        "actual experience and target roles — not just keyword overlap."
+    )
+    user_prompt = (
+        f"CANDIDATE PROFILE:\n{CANDIDATE_PROFILE}\n\n"
+        f"JOB POSTING:\nTitle: {title}\nDescription: {description}"
+    )
+
+    resp = requests.post(
+        GROQ_API_URL,
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+        json={
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    raw = resp.json()["choices"][0]["message"]["content"]
+
+    # Defensive parsing: strip accidental code fences even though we
+    # requested json_object mode, in case the model wraps it anyway.
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    parsed = json.loads(cleaned)
+    return {
+        "match_score": int(parsed.get("match_score", 0)),
+        "match_reason": str(parsed.get("match_reason", "")).strip(),
+        "german_requirement": str(parsed.get("german_requirement", "Not mentioned")).strip(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -255,8 +346,18 @@ def run_search(name: str, cfg: dict) -> None:
 
     for job in new_jobs:
         try:
-            send_telegram(cfg["label"], job)
-            print(f"[{name}] Sent alert: {job.get('title')}")
+            match = score_job_match(job)
+        except Exception as exc:  # noqa: BLE001
+            # A scoring failure should never block the job from being sent
+            # or block state persistence — fall back to no score shown.
+            print(f"[{name}] WARNING scoring failed for "
+                  f"'{job.get('title')}': {exc}", file=sys.stderr)
+            match = {"match_score": None, "match_reason": "", "german_requirement": "Unknown"}
+
+        try:
+            send_telegram(cfg["label"], job, match)
+            print(f"[{name}] Sent alert: {job.get('title')} "
+                  f"(match={match.get('match_score')})")
         except Exception as exc:  # noqa: BLE001
             # Critical: never let one bad message crash the whole run —
             # that would skip save_state() below and reset the cursor to
@@ -265,6 +366,7 @@ def run_search(name: str, cfg: dict) -> None:
             # were already updated in the filtering loop above.
             print(f"[{name}] ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
+        time.sleep(0.3)  # be polite to Groq's rate limits
 
     # Trim recent_ids to the cap (keep most recently added — since sets
     # don't preserve order, just cap by re-deriving from the current jobs
