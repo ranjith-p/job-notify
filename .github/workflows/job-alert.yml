@@ -1,15 +1,12 @@
 name: Data Science Job Alert
 
 on:
-  schedule:
-    # Every 10 minutes. This exact syntax is the one confirmed to fire
-    # reliably in testing — both the offset minute-list and the hour-range
-    # variants caused the schedule to stop triggering for many hours, so
-    # sticking with the simplest proven form here. The 9am-11pm active-hours
-    # check happens inside the job itself (see "Check active hours" step
-    # below) rather than in the cron expression.
-    - cron: "*/10 * * * *"
-  workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
+  workflow_dispatch: {}  # triggered every 10 min by an external cron-job.org
+                          # job calling this via GitHub's API — see README.
+                          # GitHub's own native `schedule:` trigger proved
+                          # unreliable (would silently stop firing for many
+                          # hours, especially after any edit to this file),
+                          # so we no longer rely on it.
 
 # Ensures only one run of this workflow executes at a time. If a manual
 # trigger and a scheduled tick land close together, the second one waits
