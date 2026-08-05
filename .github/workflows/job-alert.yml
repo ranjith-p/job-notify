@@ -64,9 +64,8 @@ jobs:
       - name: Commit updated state
         if: steps.hours.outputs.active == 'true'
         run: |
-          echo "--- state files on disk after script ran ---"
-          cat state/germany.json
-          cat state/berlin.json
+          echo "--- state file on disk after script ran ---"
+          cat state/combined.json
           echo "--- git status before add ---"
           git status
           git config user.name "job-alert-bot"
