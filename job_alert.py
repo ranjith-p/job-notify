@@ -38,8 +38,10 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 # llama-3.1-8b-instant and llama-3.3-70b-versatile were deprecated by Groq
-# on 2026-06-17. gpt-oss-20b is the recommended fast/cheap replacement.
-GROQ_MODEL = "openai/gpt-oss-20b"
+# on 2026-06-17. Using the larger gpt-oss-120b (vs. the smaller -20b) for
+# better accuracy on nuanced extraction — worth it now that job
+# descriptions can be several thousand characters (see enrich_description).
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 # Condensed from the candidate's full career history — kept short
 # deliberately so each scoring call stays cheap and fast.
@@ -196,6 +198,54 @@ def fetch_jobs(location: str | None) -> list[dict]:
     return merged
 
 
+# Adzuna's API 'description' field is frequently a truncated snippet, not
+# the full posting — this threshold is a heuristic for "probably cut off".
+DESCRIPTION_TRUNCATION_THRESHOLD = 600
+# Cap how much fetched page text we send to Groq, to bound token cost.
+MAX_DESCRIPTION_CHARS = 8000
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def enrich_description(job: dict) -> str:
+    """
+    Return the best available job description text. If Adzuna's snippet
+    looks truncated, try fetching the full posting page and extracting
+    its visible text. Falls back to the original snippet on any failure
+    — this must never raise, since a fetch failure shouldn't block
+    scoring or sending the job.
+    """
+    description = job.get("description", "") or ""
+    if len(description) >= DESCRIPTION_TRUNCATION_THRESHOLD:
+        return description
+
+    url = job.get("redirect_url", "")
+    if not url:
+        return description
+
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; JobAlertBot/1.0)"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        text = _SCRIPT_STYLE_RE.sub(" ", resp.text)
+        text = _HTML_TAG_RE.sub(" ", text)
+        text = html.unescape(text)
+        text = _WHITESPACE_RE.sub(" ", text).strip()
+
+        if len(text) > len(description):
+            return text[:MAX_DESCRIPTION_CHARS]
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING full-JD fetch failed for '{job.get('title')}': {exc}",
+              file=sys.stderr)
+
+    return description
+
+
 def format_posted_time(created: str) -> str:
     """Format Adzuna's 'created' ISO timestamp as readable Berlin local time."""
     try:
@@ -261,7 +311,7 @@ def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-def score_job_match(job: dict) -> dict:
+def score_job_match(job: dict, description: str) -> dict:
     """
     Ask Groq to score how well this job matches the candidate profile,
     and to extract the actual German language requirement (if any) as
@@ -274,7 +324,6 @@ def score_job_match(job: dict) -> dict:
     persisting state.
     """
     title = job.get("title", "")
-    description = job.get("description", "")
 
     system_prompt = (
         "You are a job-matching assistant. Given a candidate profile and a "
@@ -380,9 +429,10 @@ def run() -> None:
 
     for job in new_jobs:
         label = label_for_job(job)
+        description = enrich_description(job)
 
         try:
-            match = score_job_match(job)
+            match = score_job_match(job, description)
         except Exception as exc:  # noqa: BLE001
             # A scoring failure should never block the job from being sent
             # or block state persistence — fall back to no score shown.
