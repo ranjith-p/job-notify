@@ -2,12 +2,13 @@ name: Data Science Job Alert
 
 on:
   schedule:
-    # Every 10 minutes, offset from round numbers to avoid GitHub's
-    # peak-load scheduling delays at :00, :10, :20, etc.
-    # Restricted to hours 7-20 UTC = ~9am-11pm CEST (Berlin summer time).
-    # NOTE: when Germany switches to CET in late October, shift this to
-    # "6-19" to keep the same local 9am-11pm window.
-    - cron: "3,13,23,33,43,53 7-20 * * *"
+    # Every 10 minutes. This exact syntax is the one confirmed to fire
+    # reliably in testing — both the offset minute-list and the hour-range
+    # variants caused the schedule to stop triggering for many hours, so
+    # sticking with the simplest proven form here. The 9am-11pm active-hours
+    # check happens inside the job itself (see "Check active hours" step
+    # below) rather than in the cron expression.
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
 
 # Ensures only one run of this workflow executes at a time. If a manual
@@ -24,18 +25,37 @@ jobs:
   check-jobs:
     runs-on: ubuntu-latest
     steps:
+      - name: Check active hours
+        id: hours
+        run: |
+          hour=$(date -u +%H)
+          # 9am-11pm CEST = 7-20 UTC (Berlin summer time). When Germany
+          # switches to CET in late October, change 7/20 to 6/19 below
+          # to keep the same local window.
+          if [ "$hour" -ge 7 ] && [ "$hour" -le 20 ]; then
+            echo "active=true" >> "$GITHUB_OUTPUT"
+            echo "Within active hours (UTC hour: $hour)."
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "Outside active hours (UTC hour: $hour) — skipping this run."
+          fi
+
       - name: Check out repo
+        if: steps.hours.outputs.active == 'true'
         uses: actions/checkout@v7
 
       - name: Set up Python
+        if: steps.hours.outputs.active == 'true'
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Install dependencies
+        if: steps.hours.outputs.active == 'true'
         run: pip install -r requirements.txt
 
       - name: Run job alert script
+        if: steps.hours.outputs.active == 'true'
         env:
           ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
           ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
@@ -44,6 +64,7 @@ jobs:
         run: python job_alert.py
 
       - name: Commit updated state
+        if: steps.hours.outputs.active == 'true'
         run: |
           echo "--- state files on disk after script ran ---"
           cat state/germany.json
