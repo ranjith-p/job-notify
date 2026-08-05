@@ -200,9 +200,6 @@ def fetch_jobs(location: str | None) -> list[dict]:
     return merged
 
 
-# Adzuna's API 'description' field is frequently a truncated snippet, not
-# the full posting — this threshold is a heuristic for "probably cut off".
-DESCRIPTION_TRUNCATION_THRESHOLD = 600
 # Cap how much fetched page text we send to Groq, to bound token cost.
 MAX_DESCRIPTION_CHARS = 8000
 
@@ -213,16 +210,18 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 def enrich_description(job: dict) -> str:
     """
-    Return the best available job description text. If Adzuna's snippet
-    looks truncated, try fetching the full posting page and extracting
-    its visible text. Falls back to the original snippet on any failure
-    — this must never raise, since a fetch failure shouldn't block
-    scoring or sending the job.
+    Return the best available job description text. Adzuna's API
+    'description' field is frequently a truncated snippet — even when it
+    LOOKS reasonably long (800-2000+ chars), it can still cut off before
+    reaching requirements listed near the bottom of a posting (language
+    requirements, in particular, tend to live there). So rather than
+    gating on a length heuristic that let many truncated-but-not-short
+    snippets slip through, we always attempt to fetch the full posting
+    page and use whichever text is longer. Falls back to the original
+    snippet on any failure — this must never raise, since a fetch
+    failure shouldn't block scoring or sending the job.
     """
     description = job.get("description", "") or ""
-    if len(description) >= DESCRIPTION_TRUNCATION_THRESHOLD:
-        return description
-
     url = job.get("redirect_url", "")
     if not url:
         return description
@@ -349,18 +348,31 @@ def score_job_match(job: dict, description: str) -> dict:
         "fences, no extra text — in exactly this schema:\n"
         '{"match_score": <integer 1-10>, "match_reason": "<one short '
         'sentence, under 20 words, on why this score>", "german_requirement": '
-        '"<one short phrase describing the German language requirement, e.g. '
-        '\'Not mentioned\', \'Not mandatory, English OK\', \'B2 required\', '
-        '\'C1 fluent required for client communication\'>", "years_experience": '
-        '"<the required years of experience exactly as stated in the posting, '
-        'e.g. \'5+ years\', \'1-3 years\', \'3+ years\'; or \'Not mentioned\' '
-        'if the posting doesn\'t state a specific requirement>"}\n'
+        '"<a short phrase precisely describing the German language '
+        'situation>", "years_experience": "<the required years of '
+        "experience exactly as stated in the posting, e.g. '5+ years', "
+        "'1-3 years', '3+ years'; or 'Not mentioned' if the posting doesn't "
+        'state a specific requirement>"}\n'
         "Base match_score and match_reason ONLY on how well the job aligns "
         "with the candidate's actual skills, experience, and target roles — "
         "not just keyword overlap. Do NOT factor the German language "
         "requirement into match_score or match_reason in any way — language "
         "is reported separately in german_requirement and must not affect "
-        "or be mentioned in the other two fields."
+        "or be mentioned in the other two fields.\n\n"
+        "For german_requirement: carefully read the ENTIRE posting — "
+        "language mentions are often a brief clause buried inside a longer "
+        "sentence near the end (e.g. '...and enjoy X, Y, and ideally German' "
+        "or 'Fluent German and good English skills'), not always a separate "
+        "bullet point. Use exactly one of these forms:\n"
+        "- 'Not mentioned' — ONLY if German is never referenced anywhere in "
+        "the text at all.\n"
+        "- 'Mentioned as a plus, not required' — German is explicitly named "
+        "as optional/nice-to-have/ideal-but-not-required (e.g. 'ideally "
+        "German', 'German is a plus').\n"
+        "- '<level> required' — German is stated as required, e.g. 'B2 "
+        "required', 'Fluent German required', 'C1 required for client "
+        "communication'. If no specific CEFR level is given but fluency is "
+        "clearly required, say 'Fluent German required'."
     )
     user_prompt = (
         f"CANDIDATE PROFILE:\n{CANDIDATE_PROFILE}\n\n"
@@ -475,6 +487,8 @@ def run() -> None:
     for job in new_jobs:
         label = label_for_job(job)
         description = enrich_description(job)
+        print(f"DEBUG scoring '{job.get('title')}' with description "
+              f"length {len(description)} chars")
 
         try:
             match = score_job_match(job, description)
