@@ -22,6 +22,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -195,6 +196,16 @@ def fetch_jobs(location: str | None) -> list[dict]:
     return merged
 
 
+def format_posted_time(created: str) -> str:
+    """Format Adzuna's 'created' ISO timestamp as readable Berlin local time."""
+    try:
+        dt_utc = parse_iso(created)
+        dt_berlin = dt_utc.astimezone(ZoneInfo("Europe/Berlin"))
+        return dt_berlin.strftime("%d %b %Y, %H:%M")
+    except Exception:  # noqa: BLE001
+        return created or "Unknown"
+
+
 def send_telegram(label: str, job: dict, match: dict) -> None:
     title = job.get("title", "Untitled role")
     company = job.get("company", {}).get("display_name", "Unknown company")
@@ -202,6 +213,8 @@ def send_telegram(label: str, job: dict, match: dict) -> None:
     url = job.get("redirect_url", "")
     salary_min = job.get("salary_min")
     salary_max = job.get("salary_max")
+
+    posted_line = f"\n\n🕒 Posted: {html.escape(format_posted_time(job.get('created', '')))}"
 
     salary_line = ""
     if salary_min and salary_max:
@@ -225,7 +238,7 @@ def send_telegram(label: str, job: dict, match: dict) -> None:
     text = (
         f"{html.escape(label)} — New role\n\n"
         f"<b>{html.escape(title)}</b>\n"
-        f"{html.escape(company)} · {html.escape(location)}{salary_line}"
+        f"{html.escape(company)} · {html.escape(location)}{posted_line}{salary_line}"
         f"{score_line}{german_line}{exp_line}\n\n"
         f"{html.escape(url)}"
     )
