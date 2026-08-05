@@ -97,6 +97,8 @@ EXCLUDE_TITLE_PATTERNS = [
     r"\bintern\b",
     r"\binternship\b",
     r"\bworking student\b",
+    r"\bduales?\s+studium\b",
+    r"\bdual\s+study\b",
 ]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
@@ -345,20 +347,36 @@ def score_job_match(job: dict, description: str) -> dict:
         f"JOB POSTING:\nTitle: {title}\nDescription: {description}"
     )
 
-    resp = requests.post(
-        GROQ_API_URL,
-        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-        json={
-            "model": GROQ_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=30,
-    )
+    request_body = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+    }
+
+    # Retry on rate limits (429) with backoff — with the larger model and
+    # burst runs sending many jobs at once, hitting Groq's per-minute
+    # limit is expected occasionally; a short wait-and-retry recovers
+    # instead of just giving up and showing no score.
+    max_attempts = 4
+    resp = None
+    for attempt in range(1, max_attempts + 1):
+        resp = requests.post(
+            GROQ_API_URL,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            json=request_body,
+            timeout=30,
+        )
+        if resp.status_code != 429:
+            break
+        retry_after = float(resp.headers.get("Retry-After", 2 * attempt))
+        print(f"Groq rate-limited (attempt {attempt}/{max_attempts}), "
+              f"waiting {retry_after}s", file=sys.stderr)
+        time.sleep(retry_after)
+
     resp.raise_for_status()
     raw = resp.json()["choices"][0]["message"]["content"]
 
@@ -453,7 +471,7 @@ def run() -> None:
             # were already updated in the filtering loop above.
             print(f"ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
-        time.sleep(0.3)  # be polite to Groq's rate limits
+        time.sleep(1.0)  # be polite to Groq's rate limits (larger model = tighter limits)
 
     # Trim recent_ids to the cap (keep most recently added — since sets
     # don't preserve order, just cap by re-deriving from the current jobs
