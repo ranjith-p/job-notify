@@ -471,6 +471,25 @@ def score_job_match(job: dict, description: str) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
+_HARD_GERMAN_LEVEL_WORDS = ("c1", "c2", "fluent", "native")
+
+
+def is_hard_german_requirement(german_requirement: str) -> bool:
+    """
+    True if the LLM-extracted German requirement is a MANDATORY C1+,
+    fluent, or native-level requirement. Per our prompt schema, the
+    'plus, not required' case contains the phrase 'not required', so we
+    explicitly exclude that from matching — otherwise a naive substring
+    check on "required" would incorrectly flag optional mentions too.
+    """
+    text = (german_requirement or "").lower()
+    if "not required" in text:
+        return False
+    if "required" not in text:
+        return False
+    return any(word in text for word in _HARD_GERMAN_LEVEL_WORDS)
+
+
 def run() -> None:
     state = load_state(STATE_FILE)
     print(f"DEBUG loaded state from {STATE_FILE}: {state}")
@@ -514,13 +533,11 @@ def run() -> None:
 
             new_jobs.append(job)
 
-    if new_jobs:
-        try:
-            send_batch_header(len(new_jobs))
-        except Exception as exc:  # noqa: BLE001
-            # Never let the divider message block the actual job alerts.
-            print(f"WARNING failed to send batch header: {exc}", file=sys.stderr)
-
+    # Pass 1: enrich, score, and filter — build the final list of jobs
+    # that will actually be sent, so the batch header count is accurate
+    # (rather than counting jobs that get filtered out by the German
+    # requirement check below).
+    to_send = []
     for job in new_jobs:
         label = label_for_job(job)
         description = enrich_description(job)
@@ -537,6 +554,24 @@ def run() -> None:
             match = {"match_score": None, "match_reason": "",
                      "german_requirement": "Unknown", "years_experience": "Not mentioned"}
 
+        if is_hard_german_requirement(match.get("german_requirement", "")):
+            print(f"Skipped (requires {match.get('german_requirement')}): "
+                  f"{job.get('title')}")
+            continue
+
+        to_send.append((job, label, match))
+        time.sleep(1.0)  # be polite to Groq's rate limits (larger model = tighter limits)
+
+    # Pass 2: send the batch header (now with an accurate count), then
+    # each job.
+    if to_send:
+        try:
+            send_batch_header(len(to_send))
+        except Exception as exc:  # noqa: BLE001
+            # Never let the divider message block the actual job alerts.
+            print(f"WARNING failed to send batch header: {exc}", file=sys.stderr)
+
+    for job, label, match in to_send:
         try:
             send_telegram(label, job, match)
             print(f"Sent alert ({label}): {job.get('title')} "
@@ -549,7 +584,7 @@ def run() -> None:
             # were already updated in the filtering loop above.
             print(f"ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
-        time.sleep(1.0)  # be polite to Groq's rate limits (larger model = tighter limits)
+        time.sleep(0.3)  # be polite to Telegram's rate limits
 
     # Trim recent_ids to the cap (keep most recently added — since sets
     # don't preserve order, just cap by re-deriving from the current jobs
