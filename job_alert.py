@@ -108,6 +108,11 @@ RECENT_ID_CAP = 100
 # Results per page to pull each run (Adzuna max is 50)
 RESULTS_PER_PAGE = 50
 
+# Jobs scored below this are skipped. Jobs where scoring itself failed
+# (match_score is None) are still sent — a scoring failure shouldn't
+# compound into also hiding the job.
+MIN_MATCH_SCORE = 4
+
 STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "combined.json"
 
@@ -567,6 +572,12 @@ def run() -> None:
 
         if is_hard_german_requirement(match.get("german_requirement", "")):
             print(f"Skipped (requires {match.get('german_requirement')}): "
+                  f"{job.get('title')}")
+            continue
+
+        score = match.get("match_score")
+        if score is not None and score < MIN_MATCH_SCORE:
+            print(f"Skipped (match score {score} < {MIN_MATCH_SCORE}): "
                   f"{job.get('title')}")
             continue
 
