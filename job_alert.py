@@ -286,7 +286,7 @@ def format_posted_time(created: str) -> str:
     try:
         dt_utc = parse_iso(created)
         dt_berlin = dt_utc.astimezone(ZoneInfo("Europe/Berlin"))
-        return dt_berlin.strftime("%d %b %Y, %H:%M")
+        return dt_berlin.strftime("%d %b %Y, %I:%M %p")
     except Exception:  # noqa: BLE001
         return created or "Unknown"
 
@@ -295,7 +295,7 @@ def send_batch_header(count: int) -> None:
     """Send a single divider message marking the start of this run's batch,
     so it's easy to see where a new run's results begin in the chat
     without checking individual message timestamps."""
-    now_berlin = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d %b %Y, %H:%M")
+    now_berlin = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d %b %Y, %I:%M %p")
     text = (
         f"🔴🔴🔴 NEW BATCH — {count} ROLE{'S' if count != 1 else ''} 🔴🔴🔴\n"
         f"{now_berlin}"
