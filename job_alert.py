@@ -1,11 +1,7 @@
 """
 Data science job alert bot.
 
-Fetches Germany-wide AND Berlin-scoped Adzuna results (the Berlin-specific
-query catches listings that fall outside the top-50-per-keyword cutoff on
-the broader Germany-wide query), merges them into a single deduped list,
-and runs ONE unified new/seen cursor across everything. Each job is
-scored and sent exactly once, labeled 🇩🇪 Germany or 📍 Berlin based on
+labeled 🇩🇪 Germany or 📍 Berlin based on
 its actual location — this avoids the double-scoring/double-sending that
 happened when Germany and Berlin were tracked as two independent searches
 with separate state.
