@@ -206,21 +206,59 @@ def fetch_jobs(location: str | None) -> list[dict]:
 
 
 # Cap how much fetched page text we send to Groq, to bound token cost.
-MAX_DESCRIPTION_CHARS = 8000
-
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-_SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
-_WHITESPACE_RE = re.compile(r"\s+")
-
-
-# Cap how much fetched page text we send to Groq, to bound token cost.
-# Generous cap since we now anchor extraction to the actual job content
+# Generous cap since we anchor extraction to the actual job content
 # (see below) rather than risking it being eaten by page boilerplate.
 MAX_DESCRIPTION_CHARS = 12000
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"\s+")
+_JSONLD_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _clean_html_fragment(raw: str) -> str:
+    text = _SCRIPT_STYLE_RE.sub(" ", raw)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = html.unescape(text)
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def extract_jsonld_job_description(page_html: str) -> str | None:
+    """
+    Many job boards — including JS-rendered ones like StepStone, where the
+    visible page requires JavaScript to display content — still embed a
+    schema.org JobPosting JSON-LD block server-side, purely for Google's
+    Job Search SEO. When present, it's a much more reliable source than
+    scraping visible text, since it exists regardless of client-side
+    rendering. Returns None if no JobPosting block is found/parseable.
+    """
+    for match in _JSONLD_RE.finditer(page_html):
+        raw = match.group(1).strip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        candidates = data if isinstance(data, list) else [data]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            # Some sites nest postings under an @graph array
+            graph = item.get("@graph")
+            sub_candidates = graph if isinstance(graph, list) else [item]
+            for sub in sub_candidates:
+                if not isinstance(sub, dict):
+                    continue
+                if sub.get("@type") == "JobPosting" and sub.get("description"):
+                    # The description field itself commonly contains raw
+                    # HTML (e.g. "<p>...</p><ul><li>...") — clean it too.
+                    cleaned = _clean_html_fragment(str(sub["description"]))
+                    if cleaned:
+                        return cleaned
+    return None
 
 
 def enrich_description(job: dict) -> str:
@@ -257,10 +295,19 @@ def enrich_description(job: dict) -> str:
             timeout=15,
         )
         resp.raise_for_status()
-        text = _SCRIPT_STYLE_RE.sub(" ", resp.text)
-        text = _HTML_TAG_RE.sub(" ", text)
-        text = html.unescape(text)
-        text = _WHITESPACE_RE.sub(" ", text).strip()
+
+        # Strategy 1: JSON-LD structured data (schema.org JobPosting).
+        # This exists server-side for SEO on most job boards even when
+        # the visible page requires JavaScript to render (e.g. StepStone),
+        # so it's the most reliable source when present.
+        jsonld_desc = extract_jsonld_job_description(resp.text)
+        if jsonld_desc and len(jsonld_desc) > len(description):
+            print(f"DEBUG found JSON-LD JobPosting description for "
+                  f"'{job.get('title')}' ({len(jsonld_desc)} chars)")
+            return jsonld_desc[:MAX_DESCRIPTION_CHARS]
+
+        # Strategy 2: anchor-based text extraction from the raw page.
+        text = _clean_html_fragment(resp.text)
 
         # Anchor on a distinctive slice of the known snippet (skip the
         # very start, which is often generic like "About the role" —
