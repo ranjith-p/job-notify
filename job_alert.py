@@ -1,14 +1,4 @@
-"""
-Data science job alert bot.
 
-labeled 🇩🇪 Germany or 📍 Berlin based on
-its actual location — this avoids the double-scoring/double-sending that
-happened when Germany and Berlin were tracked as two independent searches
-with separate state.
-
-State is stored in state/combined.json so it persists between runs (the
-GitHub Actions workflow commits this back to the repo).
-"""
 
 import html
 import json
