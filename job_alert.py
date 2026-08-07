@@ -1,19 +1,3 @@
-"""
-Data science job alert bot.
-
-Fetches Germany-wide AND Berlin-scoped Adzuna results (the Berlin-specific
-query catches listings that fall outside the top-50-per-keyword cutoff on
-the broader Germany-wide query), merges them into a single deduped list,
-and runs ONE unified new/seen cursor across everything. Each job is
-scored and sent exactly once, labeled 🇩🇪 Germany or 📍 Berlin based on
-its actual location — this avoids the double-scoring/double-sending that
-happened when Germany and Berlin were tracked as two independent searches
-with separate state.
-
-State is stored in state/combined.json so it persists between runs (the
-GitHub Actions workflow commits this back to the repo).
-"""
-
 import html
 import json
 import os
@@ -37,10 +21,6 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-# llama-3.1-8b-instant and llama-3.3-70b-versatile were deprecated by Groq
-# on 2026-06-17. Using the larger gpt-oss-120b (vs. the smaller -20b) for
-# better accuracy on nuanced extraction — worth it now that job
-# descriptions can be several thousand characters (see enrich_description).
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 # Condensed from the candidate's full career history — kept short
