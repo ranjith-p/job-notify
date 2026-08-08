@@ -23,8 +23,7 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "openai/gpt-oss-120b"
 
-# Condensed from the candidate's full career history — kept short
-# deliberately so each scoring call stays cheap and fast.
+
 CANDIDATE_PROFILE = """
 Data Scientist with experience spanning banking/fintech, credit risk,
 marketing analytics, geospatial analytics, and applied AI/LLM products.
@@ -67,9 +66,7 @@ KEYWORDS = [
     "data analyst",
 ]
 
-# Title keywords that mean "skip this" — internships / working-student /
-# similar non-full-employee roles. Word-boundary matched so "intern"
-# doesn't false-match inside "international".
+
 EXCLUDE_TITLE_PATTERNS = [
     r"\bpraktikum\b",
     r"\bpraktikant\w*\b",
