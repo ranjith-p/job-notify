@@ -21,41 +21,15 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 
-CANDIDATE_PROFILE = """
-Data Scientist with experience spanning banking/fintech, credit risk,
-marketing analytics, geospatial analytics, and applied AI/LLM products.
+CANDIDATE_PROFILE = os.environ["CANDIDATE_PROFILE"]
 
-Key experience:
-- Built ML models for a Fortune 500 US bank to optimize mortgage customer
-  acquisition (propensity modeling, A/B testing, ~15% cost reduction across
-  138M households); production pipeline scoring 300M+ individuals weekly.
-- New-to-credit underwriting models using alternative data, adopted by
-  10+ banks, 5,000+ customer onboardings/month.
-- Retail/banking forecasting (FMCG store sales, ATM transaction volume)
-  using geospatial features, 82-85% forecast accuracy.
-- Enterprise geospatial/location-intelligence SaaS platform: PySpark ETL
-  on 300M+ records, custom geocoding engine (16M+ addresses), used by
-  10+ enterprise clients.
-- Master's thesis: explainable ML (LightGBM + SHAP) on 19.4M HMDA mortgage
-  records combined with 6 national datasets, studying neighborhood
-  mortgage dynamics across interest-rate cycles.
-- Personal project: AI-native adaptive language-learning platform using
-  RAG + LLMs with persistent learner memory.
-- Core skills: Python, ML/predictive modeling, experimentation (A/B
-  testing), feature engineering, PySpark/data engineering, explainable AI
-  (SHAP), geospatial analytics, stakeholder collaboration, product thinking.
-
-Target roles: Data Science, Decision Science, Applied AI/ML, Product
-Analytics, AI Product Development. Currently based in Berlin, Germany.
-""".strip()
-
-# Adzuna country code for Germany
 ADZUNA_COUNTRY = "de"
 
-# Keywords (OR'd together) — edit freely
+# Keywords (OR'd together)
 KEYWORDS = [
     "data scientist",
     "data science",
@@ -65,7 +39,6 @@ KEYWORDS = [
     "research scientist",
     "data analyst",
 ]
-
 
 EXCLUDE_TITLE_PATTERNS = [
     r"\bpraktikum\b",
@@ -79,25 +52,17 @@ EXCLUDE_TITLE_PATTERNS = [
 ]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
-# How many recent IDs to remember, as a tie-break safety net
 RECENT_ID_CAP = 100
 
-# Results per page to pull each run (Adzuna max is 50)
 RESULTS_PER_PAGE = 50
 
-# Jobs scored below this are skipped. Jobs where scoring itself failed
-# (match_score is None) are still sent — a scoring failure shouldn't
-# compound into also hiding the job.
+
 MIN_MATCH_SCORE = 4
 
 STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "combined.json"
 
-# We still query both scopes — Germany-wide AND Berlin-specific — because
-# a broad nationwide query can push Berlin listings outside the
-# top-50-per-keyword cutoff when there's a lot of nationwide volume, while
-# the Berlin-scoped query (smaller pool) still catches them. Both feed
-# into ONE merged, deduped list below.
+
 FETCH_LOCATIONS = [None, "Berlin"]  # None = no 'where' filter = whole country
 
 
@@ -116,11 +81,7 @@ def should_exclude(job: dict) -> str | None:
     if _EXCLUDE_TITLE_RE.search(title):
         return "internship/working-student role"
 
-    # Adzuna's contract_time/contract_type fields are only populated for a
-    # minority of German listings — requiring full_time=1 silently dropped
-    # every untagged posting too. Instead, only exclude jobs EXPLICITLY
-    # tagged part-time or contract/temporary; untagged jobs (the majority)
-    # are kept rather than assumed to be excluded.
+
     if job.get("contract_time") == "part_time":
         return "explicitly tagged part-time"
 
@@ -130,9 +91,6 @@ def should_exclude(job: dict) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def load_state(path: Path) -> dict:
     if path.exists():
@@ -182,9 +140,7 @@ def fetch_jobs(location: str | None) -> list[dict]:
     return merged
 
 
-# Cap how much fetched page text we send to Groq, to bound token cost.
-# Generous cap since we anchor extraction to the actual job content
-# (see below) rather than risking it being eaten by page boilerplate.
+
 MAX_DESCRIPTION_CHARS = 12000
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -265,6 +221,11 @@ def enrich_description(job: dict) -> str:
     if not url:
         return description
 
+    if "linkedin.com" in url.lower():
+        
+        print(f"DEBUG '{job.get('title')}' redirects to LinkedIn — "
+              f"fetch may be blocked or return a login-walled preview")
+
     try:
         resp = requests.get(
             url,
@@ -273,10 +234,7 @@ def enrich_description(job: dict) -> str:
         )
         resp.raise_for_status()
 
-        # Strategy 1: JSON-LD structured data (schema.org JobPosting).
-        # This exists server-side for SEO on most job boards even when
-        # the visible page requires JavaScript to render (e.g. StepStone),
-        # so it's the most reliable source when present.
+       
         jsonld_desc = extract_jsonld_job_description(resp.text)
         if jsonld_desc and len(jsonld_desc) > len(description):
             print(f"DEBUG found JSON-LD JobPosting description for "
@@ -287,8 +245,6 @@ def enrich_description(job: dict) -> str:
         text = _clean_html_fragment(resp.text)
 
         # Anchor on a distinctive slice of the known snippet (skip the
-        # very start, which is often generic like "About the role" —
-        # a slice from partway in is more likely to be unique on the page).
         anchor = description[50:150].strip() if len(description) > 150 else description.strip()
         idx = text.find(anchor) if anchor else -1
 
@@ -366,8 +322,6 @@ def send_telegram(label: str, job: dict, match: dict) -> None:
         exp_line = f"\n\n📅 Experience: {html.escape(exp)}"
 
     # HTML parse mode + explicit escaping is far more robust than Telegram's
-    # legacy Markdown, which breaks (400 error) on unescaped *, _, [, ], (, )
-    # etc. — all common in job titles like "(all genders)" or "AI/ML".
     text = (
         f"{html.escape(label)} — New role\n\n"
         f"<b>{html.escape(title)}</b>\n"
@@ -455,10 +409,6 @@ def score_job_match(job: dict, description: str) -> dict:
         "response_format": {"type": "json_object"},
     }
 
-    # Retry on rate limits (429) with backoff — with the larger model and
-    # burst runs sending many jobs at once, hitting Groq's per-minute
-    # limit is expected occasionally; a short wait-and-retry recovers
-    # instead of just giving up and showing no score.
     max_attempts = 4
     resp = None
     for attempt in range(1, max_attempts + 1):
@@ -525,9 +475,6 @@ def run() -> None:
     last_seen = parse_iso(state["last_seen_iso"])
     recent_ids = set(state["recent_ids"])
 
-    # Fetch both scopes and merge into one deduped list, keyed by job id —
-    # this is what makes a Berlin job (which matches both queries) get
-    # processed exactly once instead of twice.
     all_jobs: dict[str, dict] = {}
     for location in FETCH_LOCATIONS:
         for job in fetch_jobs(location):
@@ -552,12 +499,6 @@ def run() -> None:
 
         if is_new_by_time and is_new_by_id:
             recent_ids.add(job_id)
-            # Clamp to "now" — job boards occasionally report bogus future
-            # 'created' timestamps (reposts/bumps, clock mismatches on the
-            # source's end). If we let that poison the cursor, a genuinely
-            # new job posted between now and that fake future point would
-            # look "older than the cursor" next run and be silently
-            # skipped forever. Capping at now prevents that.
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if created > newest_iso and created <= now_iso:
                 newest_iso = created
@@ -573,10 +514,6 @@ def run() -> None:
 
             new_jobs.append(job)
 
-    # Pass 1: enrich, score, and filter — build the final list of jobs
-    # that will actually be sent, so the batch header count is accurate
-    # (rather than counting jobs that get filtered out by the German
-    # requirement check below).
     to_send = []
     for job in new_jobs:
         label = label_for_job(job)
@@ -632,9 +569,6 @@ def run() -> None:
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
-    # Trim recent_ids to the cap (keep most recently added — since sets
-    # don't preserve order, just cap by re-deriving from the current jobs
-    # payload order, newest first).
     ordered_recent = [str(j["id"]) for j in jobs if str(j.get("id")) in recent_ids]
     trimmed = ordered_recent[:RECENT_ID_CAP] if ordered_recent else list(recent_ids)[:RECENT_ID_CAP]
 
