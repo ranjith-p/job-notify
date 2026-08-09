@@ -10,6 +10,9 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
 ADZUNA_APP_ID = os.environ["ADZUNA_APP_ID"]
 ADZUNA_APP_KEY = os.environ["ADZUNA_APP_KEY"]
@@ -48,6 +51,8 @@ EXCLUDE_TITLE_PATTERNS = [
     r"\bworking student\b",
     r"\bduales?\s+studium\b",
     r"\bdual\s+study\b",
+    r"\bsoftware engineer\w*\b",
+    r"\bdata engineer\w*\b",
 ]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
@@ -85,6 +90,7 @@ def should_exclude(job: dict) -> str | None:
 
     if _EXCLUDE_TITLE_RE.search(title):
         return "internship/working-student role"
+
 
     if job.get("contract_time") == "part_time":
         return "explicitly tagged part-time"
@@ -147,7 +153,6 @@ def fetch_jobs(location: str | None) -> list[dict]:
     return merged
 
 
-
 MAX_DESCRIPTION_CHARS = 2000
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -201,35 +206,121 @@ def extract_jsonld_job_description(page_html: str) -> str | None:
     return None
 
 
-def enrich_description(job: dict) -> str:
+_REQUIREMENT_SECTION_MARKERS_RE = re.compile(
+    r"\b(your profile|who you are|requirements|qualifications|what you bring|"
+    r"must have|we\S{0,3} looking for|dein profil|ihr profil|anforderungen|"
+    r"was du mitbringst|was sie mitbringen|voraussetzungen|deine qualifikation|"
+    r"sprachkenntnisse)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_relevant_window(text: str, anchor_idx: int, total_budget: int) -> str:
     """
-    Return the best available job description text. Adzuna's API
-    'description' field is frequently a truncated snippet — even when it
-    LOOKS reasonably long (800-2000+ chars), it can still cut off before
-    reaching requirements listed near the bottom of a posting (language
-    requirements, in particular, tend to live there). So rather than
-    gating on a length heuristic that let many truncated-but-not-short
-    snippets slip through, we always attempt to fetch the full posting
-    page.
+    Build a text window within `total_budget` chars, prioritizing:
+    1. Some initial context from the known job content (anchor_idx, or
+       start of page if no anchor was found).
+    2. The requirements/qualifications section specifically, if a marker
+       for one is found anywhere in the text — language requirements
+       most commonly live there, and a fixed continuous block from a
+       single point can miss it entirely if the section falls outside
+       that block on a long posting.
+    Falls back to a head+tail split of the whole page if no requirements
+    marker is found — better odds of catching content near the end
+    (where requirements sections often are, even without a header we
+    recognize) than a single continuous block from the start.
+    """
+    start = max(anchor_idx, 0)
 
-    Naively stripping an entire page to text and taking the first N
-    characters risks the cap being consumed by nav bars, cookie banners,
-    and footers before ever reaching the real job description — so we
-    anchor: locate where the known Adzuna snippet actually appears within
-    the cleaned page text, and extract forward from THAT point, skipping
-    past the boilerplate that usually precedes real content in the DOM.
+    if len(text) - start <= total_budget:
+        return text[start:start + total_budget]
 
-    Falls back to the original snippet on any failure or if the anchor
-    can't be found — this must never raise, since a fetch failure
-    shouldn't block scoring or sending the job.
+    marker_match = _REQUIREMENT_SECTION_MARKERS_RE.search(text, start)
+    if marker_match:
+        req_idx = marker_match.start()
+        context_budget = total_budget // 3
+        req_budget = total_budget - context_budget
+        context = text[start:start + context_budget]
+        requirements = text[req_idx:req_idx + req_budget]
+        return f"{context}\n...\n{requirements}"
+
+    head_budget = total_budget // 2
+    tail_budget = total_budget - head_budget
+    head = text[start:start + head_budget]
+    tail = text[-tail_budget:]
+    return f"{head}\n...\n{tail}"
+
+
+_GERMAN_MENTION_RE = re.compile(r"\b(german|deutsch\w*)\b", re.IGNORECASE)
+
+
+def extract_german_mentions(text: str, context_chars: int = 150, max_mentions: int = 5) -> str:
+    """
+    Scan text for any mention of 'German'/'Deutsch' and return the
+    surrounding context for each occurrence, deduplicated. This is plain
+    local regex scanning — zero LLM token cost — so it's run on the
+    FULL fetched page text, not the token-budget-limited description
+    window. That means a language requirement can never be missed due
+    to truncation, regardless of where in a long posting it appears.
+    Only the small extracted excerpts (not the whole page) get sent to
+    Groq afterward, for a much cheaper and more reliable check than
+    asking the model to find it within the whole JD itself.
+    """
+    if not text:
+        return ""
+    mentions = []
+    seen_spans = set()
+    for match in _GERMAN_MENTION_RE.finditer(text):
+        start = max(0, match.start() - context_chars)
+        end = min(len(text), match.end() + context_chars)
+        span_key = (start // 50, end // 50)  # coarse dedupe of overlapping windows
+        if span_key in seen_spans:
+            continue
+        seen_spans.add(span_key)
+        mentions.append(text[start:end].strip())
+        if len(mentions) >= max_mentions:
+            break
+    return "\n---\n".join(mentions)
+
+
+def enrich_description(job: dict) -> dict:
+    """
+    Return {"description": <windowed text for match-score/years-exp>,
+             "german_context": <focused German-mention excerpts, or ""
+             if none found anywhere on the full page>}.
+
+    Adzuna's API 'description' field is frequently a truncated snippet —
+    even when it LOOKS reasonably long, it can still cut off before
+    reaching requirements near the bottom of a posting. So we always
+    attempt to fetch the full posting page. The 'description' window is
+    still capped at MAX_DESCRIPTION_CHARS (for match-scoring token cost),
+    but 'german_context' is extracted from the FULL page separately — see
+    extract_german_mentions — decoupling the German check entirely from
+    that token budget.
+
+    Falls back to the original snippet / empty german_context on any
+    failure — this must never raise, since a fetch failure shouldn't
+    block scoring or sending the job.
     """
     description = job.get("description", "") or ""
     url = job.get("redirect_url", "")
+
+    # Fallback scan against whatever we have, in case the fetch below
+    # fails entirely — better than no German check at all.
+    full_text_for_scan = description
+    windowed_description = description
+
     if not url:
-        return description
+        return {"description": windowed_description,
+                "german_context": extract_german_mentions(full_text_for_scan)}
 
     if "linkedin.com" in url.lower():
-
+        # LinkedIn is known to block/limit non-browser traffic and often
+        # shows only a truncated preview without login — flagging this in
+        # logs rather than adding LinkedIn-specific handling, so it's
+        # visible whether this is even a live issue (does Adzuna surface
+        # many LinkedIn listings?) and whether the generic fetch below
+        # happens to succeed anyway.
         print(f"DEBUG '{job.get('title')}' redirects to LinkedIn — "
               f"fetch may be blocked or return a login-walled preview")
 
@@ -241,38 +332,43 @@ def enrich_description(job: dict) -> str:
         )
         resp.raise_for_status()
 
-
         jsonld_desc = extract_jsonld_job_description(resp.text)
         if jsonld_desc and len(jsonld_desc) > len(description):
+            full_text_for_scan = jsonld_desc
+            windowed_description = _extract_relevant_window(jsonld_desc, 0, MAX_DESCRIPTION_CHARS)
             print(f"DEBUG found JSON-LD JobPosting description for "
-                  f"'{job.get('title')}' ({len(jsonld_desc)} chars)")
-            return jsonld_desc[:MAX_DESCRIPTION_CHARS]
-
-        # Strategy 2: anchor-based text extraction from the raw page.
-        text = _clean_html_fragment(resp.text)
-
-        # Anchor on a distinctive slice of the known snippet (skip the
-        # very start, which is often generic like "About the role" —
-        # a slice from partway in is more likely to be unique on the page).
-        anchor = description[50:150].strip() if len(description) > 150 else description.strip()
-        idx = text.find(anchor) if anchor else -1
-
-        if idx != -1:
-            candidate = text[idx:idx + MAX_DESCRIPTION_CHARS]
-            print(f"DEBUG anchor found for '{job.get('title')}' at index {idx}; "
-                  f"extracted {len(candidate)} chars from that point")
+                  f"'{job.get('title')}' ({len(windowed_description)} chars "
+                  f"used for scoring, {len(full_text_for_scan)} chars scanned "
+                  f"for German mentions)")
         else:
-            candidate = text[:MAX_DESCRIPTION_CHARS]
-            print(f"DEBUG anchor NOT found for '{job.get('title')}'; "
-                  f"using first {len(candidate)} chars of page instead")
+            # Strategy 2: anchor-based text extraction from the raw page.
+            text = _clean_html_fragment(resp.text)
+            full_text_for_scan = text if len(text) > len(description) else description
 
-        if len(candidate) > len(description):
-            return candidate
+
+            anchor = description[50:150].strip() if len(description) > 150 else description.strip()
+            idx = text.find(anchor) if anchor else -1
+
+            candidate = _extract_relevant_window(text, idx, MAX_DESCRIPTION_CHARS)
+            if idx != -1:
+                print(f"DEBUG anchor found for '{job.get('title')}' at index "
+                      f"{idx}; extracted window prioritizing requirements "
+                      f"section ({len(candidate)} chars for scoring, "
+                      f"{len(full_text_for_scan)} chars scanned for German)")
+            else:
+                print(f"DEBUG anchor NOT found for '{job.get('title')}'; "
+                      f"extracted window from start of page ({len(candidate)} "
+                      f"chars for scoring, {len(full_text_for_scan)} chars "
+                      f"scanned for German)")
+
+            if len(candidate) > len(description):
+                windowed_description = candidate
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING full-JD fetch failed for '{job.get('title')}': {exc}",
               file=sys.stderr)
 
-    return description
+    german_context = extract_german_mentions(full_text_for_scan)
+    return {"description": windowed_description, "german_context": german_context}
 
 
 def format_posted_time(created: str) -> str:
@@ -356,11 +452,13 @@ def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-def score_job_match(job: dict, description: str) -> dict:
+def score_job_match(job: dict, description: str, german_context: str) -> dict:
     """
     Ask Groq to score how well this job matches the candidate profile,
-    and to extract the actual German language requirement (if any) as
-    a short human-readable note.
+    and to classify the German language requirement from a focused
+    excerpt (see extract_german_mentions) rather than the whole JD —
+    cheaper and more reliable than asking the model to find a brief
+    mention buried somewhere in a long posting.
 
     Returns a dict like:
         {"match_score": 8, "match_reason": "...", "german_requirement": "..."}
@@ -370,10 +468,19 @@ def score_job_match(job: dict, description: str) -> dict:
     """
     title = job.get("title", "")
 
+
+    german_section = (
+        f"Excerpts from the posting that mention German:\n{german_context}"
+        if german_context
+        else "No mention of 'German' or 'Deutsch' was found anywhere in "
+             "the full posting text."
+    )
+
     system_prompt = (
-        "You are a job-matching assistant. Given a candidate profile and a "
-        "job posting, respond with STRICT JSON only — no markdown, no code "
-        "fences, no extra text — in exactly this schema:\n"
+        "You are a job-matching assistant. Given a candidate profile, a "
+        "job posting, and separately-extracted excerpts about German "
+        "language mentions, respond with STRICT JSON only — no markdown, "
+        "no code fences, no extra text — in exactly this schema:\n"
         '{"match_score": <integer 1-10>, "match_reason": "<one short '
         'sentence, under 20 words, on why this score>", "german_requirement": '
         '"<a short phrase precisely describing the German language '
@@ -387,13 +494,12 @@ def score_job_match(job: dict, description: str) -> dict:
         "requirement into match_score or match_reason in any way — language "
         "is reported separately in german_requirement and must not affect "
         "or be mentioned in the other two fields.\n\n"
-        "For german_requirement: carefully read the ENTIRE posting — "
-        "language mentions are often a brief clause buried inside a longer "
-        "sentence near the end (e.g. '...and enjoy X, Y, and ideally German' "
-        "or 'Fluent German and good English skills'), not always a separate "
-        "bullet point. Use exactly one of these forms:\n"
-        "- 'Not mentioned' — ONLY if German is never referenced anywhere in "
-        "the text at all.\n"
+        "For german_requirement: base your answer ONLY on the separately "
+        "provided German-mention excerpts (not the main posting text — "
+        "those excerpts are the authoritative, complete set of every "
+        "German mention found anywhere in the full posting). Use exactly "
+        "one of these forms:\n"
+        "- 'Not mentioned' — if told no mention was found.\n"
         "- 'Mentioned as a plus, not required' — German is explicitly named "
         "as optional/nice-to-have/ideal-but-not-required (e.g. 'ideally "
         "German', 'German is a plus').\n"
@@ -404,7 +510,8 @@ def score_job_match(job: dict, description: str) -> dict:
     )
     user_prompt = (
         f"CANDIDATE PROFILE:\n{CANDIDATE_PROFILE}\n\n"
-        f"JOB POSTING:\nTitle: {title}\nDescription: {description}"
+        f"JOB POSTING:\nTitle: {title}\nDescription: {description}\n\n"
+        f"{german_section}"
     )
 
     request_body = {
@@ -443,8 +550,7 @@ def score_job_match(job: dict, description: str) -> dict:
     resp.raise_for_status()
     raw = resp.json()["choices"][0]["message"]["content"]
 
-    # Defensive parsing: strip accidental code fences even though we
-    # requested json_object mode, in case the model wraps it anyway.
+
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`")
@@ -460,10 +566,6 @@ def score_job_match(job: dict, description: str) -> dict:
         "years_experience": str(parsed.get("years_experience", "Not mentioned")).strip(),
     }
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 _HARD_GERMAN_LEVEL_WORDS = ("c1", "c2", "fluent", "native")
 
@@ -490,9 +592,6 @@ def run() -> None:
     last_seen = parse_iso(state["last_seen_iso"])
     recent_ids = set(state["recent_ids"])
 
-    # Fetch both scopes and merge into one deduped list, keyed by job id —
-    # this is what makes a Berlin job (which matches both queries) get
-    # processed exactly once instead of twice.
     all_jobs: dict[str, dict] = {}
     for location in FETCH_LOCATIONS:
         for job in fetch_jobs(location):
@@ -533,7 +632,6 @@ def run() -> None:
 
             new_jobs.append(job)
 
-
     to_send = []
     for i, job in enumerate(new_jobs):
         label = label_for_job(job)
@@ -547,12 +645,15 @@ def run() -> None:
             to_send.append((job, label, match))
             continue
 
-        description = enrich_description(job)
+        enriched = enrich_description(job)
+        description = enriched["description"]
+        german_context = enriched["german_context"]
         print(f"DEBUG scoring '{job.get('title')}' with description "
-              f"length {len(description)} chars")
+              f"length {len(description)} chars, german_context "
+              f"{'found (' + str(len(german_context)) + ' chars)' if german_context else 'NOT found'}")
 
         try:
-            match = score_job_match(job, description)
+            match = score_job_match(job, description, german_context)
         except Exception as exc:  # noqa: BLE001
 
             print(f"WARNING scoring failed for '{job.get('title')}': {exc}",
@@ -594,9 +695,7 @@ def run() -> None:
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
-    # Trim recent_ids to the cap (keep most recently added — since sets
-    # don't preserve order, just cap by re-deriving from the current jobs
-    # payload order, newest first).
+
     ordered_recent = [str(j["id"]) for j in jobs if str(j.get("id")) in recent_ids]
     trimmed = ordered_recent[:RECENT_ID_CAP] if ordered_recent else list(recent_ids)[:RECENT_ID_CAP]
 
