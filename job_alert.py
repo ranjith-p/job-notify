@@ -10,9 +10,6 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 
 ADZUNA_APP_ID = os.environ["ADZUNA_APP_ID"]
 ADZUNA_APP_KEY = os.environ["ADZUNA_APP_KEY"]
@@ -41,9 +38,7 @@ KEYWORDS = [
     "data analyst",
 ]
 
-# Title keywords that mean "skip this" — internships / working-student /
-# similar non-full-employee roles. Word-boundary matched so "intern"
-# doesn't false-match inside "international".
+
 EXCLUDE_TITLE_PATTERNS = [
     r"\bpraktikum\b",
     r"\bpraktikant\w*\b",
@@ -62,15 +57,17 @@ RECENT_ID_CAP = 100
 # Results per page to pull each run (Adzuna max is 50)
 RESULTS_PER_PAGE = 50
 
+
 MIN_MATCH_SCORE = 4
+
+
+GROQ_CALL_PACING_SECONDS = 8
+MAX_JOBS_SCORED_PER_RUN = 60
 
 STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "combined.json"
 
-# We still query both scopes — Germany-wide AND Berlin-specific — because
-# a broad nationwide query can push Berlin listings outside the
-# top-50-per-keyword cutoff when there's a lot of nationwide volume, while
-# the Berlin-scoped query (smaller pool) still catches them. 
+
 FETCH_LOCATIONS = [None, "Berlin"]  # None = no 'where' filter = whole country
 
 
@@ -88,7 +85,6 @@ def should_exclude(job: dict) -> str | None:
 
     if _EXCLUDE_TITLE_RE.search(title):
         return "internship/working-student role"
-
 
     if job.get("contract_time") == "part_time":
         return "explicitly tagged part-time"
@@ -152,7 +148,7 @@ def fetch_jobs(location: str | None) -> list[dict]:
 
 
 
-MAX_DESCRIPTION_CHARS = 4000
+MAX_DESCRIPTION_CHARS = 2000
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
@@ -255,6 +251,9 @@ def enrich_description(job: dict) -> str:
         # Strategy 2: anchor-based text extraction from the raw page.
         text = _clean_html_fragment(resp.text)
 
+        # Anchor on a distinctive slice of the known snippet (skip the
+        # very start, which is often generic like "About the role" —
+        # a slice from partway in is more likely to be unique on the page).
         anchor = description[50:150].strip() if len(description) > 150 else description.strip()
         idx = text.find(anchor) if anchor else -1
 
@@ -331,9 +330,6 @@ def send_telegram(label: str, job: dict, match: dict) -> None:
     if exp and exp.lower() != "not mentioned":
         exp_line = f"\n\n📅 Experience: {html.escape(exp)}"
 
-    # HTML parse mode + explicit escaping is far more robust than Telegram's
-    # legacy Markdown, which breaks (400 error) on unescaped *, _, [, ], (, )
-    # etc. — all common in job titles like "(all genders)" or "AI/ML".
     text = (
         f"{html.escape(label)} — New role\n\n"
         f"<b>{html.escape(title)}</b>\n"
@@ -521,12 +517,7 @@ def run() -> None:
 
         if is_new_by_time and is_new_by_id:
             recent_ids.add(job_id)
-            # Clamp to "now" — job boards occasionally report bogus future
-            # 'created' timestamps (reposts/bumps, clock mismatches on the
-            # source's end). If we let that poison the cursor, a genuinely
-            # new job posted between now and that fake future point would
-            # look "older than the cursor" next run and be silently
-            # skipped forever. Capping at now prevents that.
+
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if created > newest_iso and created <= now_iso:
                 newest_iso = created
@@ -542,10 +533,20 @@ def run() -> None:
 
             new_jobs.append(job)
 
- 
+
     to_send = []
-    for job in new_jobs:
+    for i, job in enumerate(new_jobs):
         label = label_for_job(job)
+
+        if i >= MAX_JOBS_SCORED_PER_RUN:
+
+            print(f"Skipping score for '{job.get('title')}' — per-run "
+                  f"scoring cap ({MAX_JOBS_SCORED_PER_RUN}) reached")
+            match = {"match_score": None, "match_reason": "",
+                     "german_requirement": "Unknown", "years_experience": "Not mentioned"}
+            to_send.append((job, label, match))
+            continue
+
         description = enrich_description(job)
         print(f"DEBUG scoring '{job.get('title')}' with description "
               f"length {len(description)} chars")
@@ -553,8 +554,7 @@ def run() -> None:
         try:
             match = score_job_match(job, description)
         except Exception as exc:  # noqa: BLE001
-            # A scoring failure should never block the job from being sent
-            # or block state persistence — fall back to no score shown.
+
             print(f"WARNING scoring failed for '{job.get('title')}': {exc}",
                   file=sys.stderr)
             match = {"match_score": None, "match_reason": "",
@@ -572,7 +572,7 @@ def run() -> None:
             continue
 
         to_send.append((job, label, match))
-        time.sleep(1.0)  # be polite to Groq's rate limits (larger model = tighter limits)
+        time.sleep(GROQ_CALL_PACING_SECONDS)
 
     # Pass 2: send the batch header (now with an accurate count), then
     # each job.
@@ -589,16 +589,14 @@ def run() -> None:
             print(f"Sent alert ({label}): {job.get('title')} "
                   f"(match={match.get('match_score')})")
         except Exception as exc:  # noqa: BLE001
-            # Critical: never let one bad message crash the whole run —
-            # that would skip save_state() below and reset the cursor to
-            # square one, causing every job to be resent next run. Log and
-            # move on; the cursor still advances since recent_ids/newest_iso
-            # were already updated in the filtering loop above.
+
             print(f"ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
-   
+    # Trim recent_ids to the cap (keep most recently added — since sets
+    # don't preserve order, just cap by re-deriving from the current jobs
+    # payload order, newest first).
     ordered_recent = [str(j["id"]) for j in jobs if str(j.get("id")) in recent_ids]
     trimmed = ordered_recent[:RECENT_ID_CAP] if ordered_recent else list(recent_ids)[:RECENT_ID_CAP]
 
