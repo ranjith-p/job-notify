@@ -22,14 +22,15 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_MODEL = "openai/gpt-oss-20b"
 
 
 CANDIDATE_PROFILE = os.environ["CANDIDATE_PROFILE"]
 
+# Adzuna country code for Germany
 ADZUNA_COUNTRY = "de"
 
-# Keywords (OR'd together)
+# Keywords (OR'd together) — edit freely
 KEYWORDS = [
     "data scientist",
     "data science",
@@ -40,6 +41,9 @@ KEYWORDS = [
     "data analyst",
 ]
 
+# Title keywords that mean "skip this" — internships / working-student /
+# similar non-full-employee roles. Word-boundary matched so "intern"
+# doesn't false-match inside "international".
 EXCLUDE_TITLE_PATTERNS = [
     r"\bpraktikum\b",
     r"\bpraktikant\w*\b",
@@ -52,17 +56,21 @@ EXCLUDE_TITLE_PATTERNS = [
 ]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
+# How many recent IDs to remember, as a tie-break safety net
 RECENT_ID_CAP = 100
 
+# Results per page to pull each run (Adzuna max is 50)
 RESULTS_PER_PAGE = 50
-
 
 MIN_MATCH_SCORE = 4
 
 STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "combined.json"
 
-
+# We still query both scopes — Germany-wide AND Berlin-specific — because
+# a broad nationwide query can push Berlin listings outside the
+# top-50-per-keyword cutoff when there's a lot of nationwide volume, while
+# the Berlin-scoped query (smaller pool) still catches them. 
 FETCH_LOCATIONS = [None, "Berlin"]  # None = no 'where' filter = whole country
 
 
@@ -91,6 +99,9 @@ def should_exclude(job: dict) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def load_state(path: Path) -> dict:
     if path.exists():
@@ -141,7 +152,7 @@ def fetch_jobs(location: str | None) -> list[dict]:
 
 
 
-MAX_DESCRIPTION_CHARS = 12000
+MAX_DESCRIPTION_CHARS = 4000
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
@@ -222,7 +233,7 @@ def enrich_description(job: dict) -> str:
         return description
 
     if "linkedin.com" in url.lower():
-        
+
         print(f"DEBUG '{job.get('title')}' redirects to LinkedIn — "
               f"fetch may be blocked or return a login-walled preview")
 
@@ -234,7 +245,7 @@ def enrich_description(job: dict) -> str:
         )
         resp.raise_for_status()
 
-       
+
         jsonld_desc = extract_jsonld_job_description(resp.text)
         if jsonld_desc and len(jsonld_desc) > len(description):
             print(f"DEBUG found JSON-LD JobPosting description for "
@@ -244,7 +255,6 @@ def enrich_description(job: dict) -> str:
         # Strategy 2: anchor-based text extraction from the raw page.
         text = _clean_html_fragment(resp.text)
 
-        # Anchor on a distinctive slice of the known snippet (skip the
         anchor = description[50:150].strip() if len(description) > 150 else description.strip()
         idx = text.find(anchor) if anchor else -1
 
@@ -322,6 +332,8 @@ def send_telegram(label: str, job: dict, match: dict) -> None:
         exp_line = f"\n\n📅 Experience: {html.escape(exp)}"
 
     # HTML parse mode + explicit escaping is far more robust than Telegram's
+    # legacy Markdown, which breaks (400 error) on unescaped *, _, [, ], (, )
+    # etc. — all common in job titles like "(all genders)" or "AI/ML".
     text = (
         f"{html.escape(label)} — New role\n\n"
         f"<b>{html.escape(title)}</b>\n"
@@ -409,7 +421,9 @@ def score_job_match(job: dict, description: str) -> dict:
         "response_format": {"type": "json_object"},
     }
 
-    max_attempts = 4
+
+    max_attempts = 3
+    max_retry_wait_seconds = 15
     resp = None
     for attempt in range(1, max_attempts + 1):
         resp = requests.post(
@@ -421,6 +435,11 @@ def score_job_match(job: dict, description: str) -> dict:
         if resp.status_code != 429:
             break
         retry_after = float(resp.headers.get("Retry-After", 2 * attempt))
+        if retry_after > max_retry_wait_seconds:
+            print(f"Groq rate-limited, suggested wait {retry_after}s exceeds "
+                  f"cap of {max_retry_wait_seconds}s — giving up on this "
+                  f"job's score rather than waiting", file=sys.stderr)
+            break
         print(f"Groq rate-limited (attempt {attempt}/{max_attempts}), "
               f"waiting {retry_after}s", file=sys.stderr)
         time.sleep(retry_after)
@@ -475,6 +494,9 @@ def run() -> None:
     last_seen = parse_iso(state["last_seen_iso"])
     recent_ids = set(state["recent_ids"])
 
+    # Fetch both scopes and merge into one deduped list, keyed by job id —
+    # this is what makes a Berlin job (which matches both queries) get
+    # processed exactly once instead of twice.
     all_jobs: dict[str, dict] = {}
     for location in FETCH_LOCATIONS:
         for job in fetch_jobs(location):
@@ -499,6 +521,12 @@ def run() -> None:
 
         if is_new_by_time and is_new_by_id:
             recent_ids.add(job_id)
+            # Clamp to "now" — job boards occasionally report bogus future
+            # 'created' timestamps (reposts/bumps, clock mismatches on the
+            # source's end). If we let that poison the cursor, a genuinely
+            # new job posted between now and that fake future point would
+            # look "older than the cursor" next run and be silently
+            # skipped forever. Capping at now prevents that.
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if created > newest_iso and created <= now_iso:
                 newest_iso = created
@@ -514,6 +542,7 @@ def run() -> None:
 
             new_jobs.append(job)
 
+ 
     to_send = []
     for job in new_jobs:
         label = label_for_job(job)
@@ -569,6 +598,7 @@ def run() -> None:
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
+   
     ordered_recent = [str(j["id"]) for j in jobs if str(j.get("id")) in recent_ids]
     trimmed = ordered_recent[:RECENT_ID_CAP] if ordered_recent else list(recent_ids)[:RECENT_ID_CAP]
 
