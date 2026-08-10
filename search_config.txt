@@ -1,0 +1,80 @@
+# =============================================================================
+# Job alert search configuration
+#
+# Edit this file to customize what the bot searches for and filters out —
+# no Python knowledge needed. Lines starting with # are comments and are
+# ignored. Blank lines are ignored too. Each setting lives under its own
+# [SECTION] header; add or remove lines under a section to change it.
+#
+# After editing, commit and push this file — the next run picks it up
+# automatically.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# KEYWORDS — job title/description phrases to search for (one per line).
+# Each is queried as an exact phrase against Adzuna; results are merged.
+# ---------------------------------------------------------------------------
+[KEYWORDS]
+data scientist
+data science
+machine learning engineer
+ML engineer
+applied scientist
+research scientist
+data analyst
+
+
+# ---------------------------------------------------------------------------
+# EXCLUDE_TITLES — if a job's title contains any of these (as a whole
+# word/phrase, case-insensitive), it's skipped entirely. One per line.
+# Matching is exact (no wildcard) so it stays predictable — list inflected
+# forms separately if needed (e.g. both "praktikant" and "praktikantin"
+# are included below).
+# ---------------------------------------------------------------------------
+[EXCLUDE_TITLES]
+praktikum
+praktikant
+praktikantin
+werkstudent
+werkstudentin
+intern
+internship
+working student
+duales studium
+dual studium
+dual study
+software engineer
+data engineer
+
+
+# ---------------------------------------------------------------------------
+# EXCLUDE_GERMAN_LEVELS — job is skipped if the LLM determines German is a
+# MANDATORY requirement at one of these levels. One per line. Common
+# values: b1, b2, c1, c2, fluent, native. Jobs where German is mentioned
+# as optional/nice-to-have are never excluded, regardless of this list.
+# ---------------------------------------------------------------------------
+[EXCLUDE_GERMAN_LEVELS]
+c1
+c2
+fluent
+native
+
+
+# ---------------------------------------------------------------------------
+# LOCATIONS — where to search. Use "Germany" (exactly, capital G) for a
+# nationwide search with no location filter. Add more lines for specific
+# cities to also search (helps catch listings that fall outside the
+# nationwide query's per-keyword result cutoff). One per line.
+# ---------------------------------------------------------------------------
+[LOCATIONS]
+Germany
+Berlin
+
+
+# ---------------------------------------------------------------------------
+# MIN_MATCH_SCORE — jobs scored below this (out of 10) by the LLM are
+# skipped. Single number, 1-10. Jobs where scoring itself failed are
+# still sent regardless of this setting.
+# ---------------------------------------------------------------------------
+[MIN_MATCH_SCORE]
+4
