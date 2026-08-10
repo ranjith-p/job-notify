@@ -1,7 +1,7 @@
 # Data Science Job Alert Bot
 
-Checks Adzuna every 10 minutes for new data science roles  one search
-covering all of Germany, one scoped to Berlin and sends a Telegram
+Checks Adzuna every 10 minutes for new data science roles — one search
+covering all of Germany, one scoped to Berlin — and sends a Telegram
 message for each new listing. Runs entirely free on GitHub Actions.
 
 ## Heads up on the first run
@@ -113,18 +113,19 @@ cron-job.org, not GitHub.
 
 ## Tuning it
 
-- **Keywords**: edit the `KEYWORDS` list near the top of `job_alert.py`.
-- **Frequency**: edit the `cron` line in
-  `.github/workflows/job-alert.yml` (`*/10 * * * *` = every 10 min;
-  GitHub's minimum supported interval is every 5 minutes, but very
-  frequent schedules can be throttled/delayed by GitHub under load).
-- **Locations**: add more entries to the `SEARCHES` dict in
-  `job_alert.py` if you later want e.g. Munich or Hamburg too — each
-  gets its own state file and its own labeled alerts automatically.
-- **Adzuna free tier limits**: check current limits on your Adzuna
-  dashboard — free tier is generous for this use case (a couple of
-  calls every 10 minutes), but worth a glance if you add many more
-  search variants.
+- **Everything search-related** — keywords, exclusions, locations,
+  match threshold, Adzuna country, Groq model, and rate-limit pacing —
+  lives in `search_config.txt` at the repo root. Plain text, no code
+  involved. Each setting lives under its own `[SECTION]` header; add or
+  remove lines to change it. Lines starting with `#` are comments.
+  Commit and push after editing; the next run picks it up automatically.
+  If the file is missing or a section is empty, the bot falls back to
+  sensible built-in defaults rather than failing.
+- **Your profile** (for match scoring): update the `CANDIDATE_PROFILE`
+  GitHub Secret — see step 1c above.
+- **Frequency**: handled by your cron-job.org schedule now, not GitHub's
+  native cron (see "Set up the external scheduler" above) — edit the
+  schedule there.
 
 ## Why this architecture (vs. scraping LinkedIn/Indeed directly)
 
