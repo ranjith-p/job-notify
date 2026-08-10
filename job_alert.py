@@ -471,7 +471,7 @@ def send_batch_header(count: int) -> None:
     without checking individual message timestamps."""
     now_berlin = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d %b %Y, %I:%M %p")
     text = (
-        f"🔴🔴🔴 NEW BATCH — {count} ROLE{'S' if count != 1 else ''} 🔴🔴🔴\n"
+        f"💼 NEW BATCH — {count} ROLE{'S' if count != 1 else ''} 💼\n"
         f"{now_berlin}"
     )
 
