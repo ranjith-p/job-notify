@@ -10,10 +10,6 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
 ADZUNA_APP_ID = os.environ["ADZUNA_APP_ID"]
 ADZUNA_APP_KEY = os.environ["ADZUNA_APP_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -27,33 +23,93 @@ GROQ_MODEL = "openai/gpt-oss-20b"
 
 CANDIDATE_PROFILE = os.environ["CANDIDATE_PROFILE"]
 
-# Adzuna country code for Germany
 ADZUNA_COUNTRY = "de"
 
-# Keywords (OR'd together) — edit freely
-KEYWORDS = [
-    "data scientist",
-    "data science",
-    "machine learning engineer",
-    "ML engineer",
-    "applied scientist",
-    "research scientist",
-    "data analyst",
+CONFIG_FILE = Path(__file__).parent / "search_config.txt"
+
+# Fallback defaults, used only if search_config.txt is missing 
+_DEFAULT_KEYWORDS = [
+    "data scientist", "data science", "machine learning engineer",
+    "ML engineer", "applied scientist", "research scientist", "data analyst",
 ]
+_DEFAULT_EXCLUDE_TITLES = [
+    "praktikum", "praktikant", "werkstudent", "intern", "internship",
+    "working student", "duales studium", "dual study", "software engineer",
+    "data engineer",
+]
+_DEFAULT_EXCLUDE_GERMAN_LEVELS = ["c1", "c2", "fluent", "native"]
+_DEFAULT_LOCATIONS = ["Germany", "Berlin"]
+_DEFAULT_MIN_MATCH_SCORE = 4
 
 
-EXCLUDE_TITLE_PATTERNS = [
-    r"\bpraktikum\b",
-    r"\bpraktikant\w*\b",
-    r"\bwerkstudent\w*\b",
-    r"\bintern\b",
-    r"\binternship\b",
-    r"\bworking student\b",
-    r"\bduales?\s+studium\b",
-    r"\bdual\s+study\b",
-    r"\bsoftware engineer\w*\b",
-    r"\bdata engineer\w*\b",
-]
+def load_search_config(path: Path) -> dict:
+    """
+    Parse the plain-text search config file into a dict of settings.
+    Format: '[SECTION]' headers followed by one value per line; '#'
+    starts a comment; blank lines are ignored. Missing file or missing/
+    empty sections fall back to the defaults above, with a warning —
+    this should never crash the run over a config typo.
+    """
+    result = {
+        "KEYWORDS": [],
+        "EXCLUDE_TITLES": [],
+        "EXCLUDE_GERMAN_LEVELS": [],
+        "LOCATIONS": [],
+        "MIN_MATCH_SCORE": [],
+    }
+
+    if not path.exists():
+        print(f"WARNING {path} not found — using built-in defaults", file=sys.stderr)
+    else:
+        current_section = None
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip()
+                current_section = section if section in result else None
+                if current_section is None:
+                    print(f"WARNING unknown section '{section}' in "
+                          f"{path.name} — ignoring", file=sys.stderr)
+                continue
+            if current_section:
+                result[current_section].append(line)
+
+    keywords = result["KEYWORDS"] or _DEFAULT_KEYWORDS
+    exclude_titles = result["EXCLUDE_TITLES"] or _DEFAULT_EXCLUDE_TITLES
+    exclude_german_levels = [w.lower() for w in result["EXCLUDE_GERMAN_LEVELS"]] or _DEFAULT_EXCLUDE_GERMAN_LEVELS
+    locations = result["LOCATIONS"] or _DEFAULT_LOCATIONS
+
+    try:
+        min_match_score = int(result["MIN_MATCH_SCORE"][0])
+    except (IndexError, ValueError):
+        min_match_score = _DEFAULT_MIN_MATCH_SCORE
+
+    # "Germany" (nationwide, no location filter) maps to None for the
+    # Adzuna 'where' param; anything else is passed through as-is.
+    fetch_locations = [None if loc.strip().lower() == "germany" else loc for loc in locations]
+
+    return {
+        "KEYWORDS": keywords,
+        "EXCLUDE_TITLES": exclude_titles,
+        "EXCLUDE_GERMAN_LEVELS": exclude_german_levels,
+        "FETCH_LOCATIONS": fetch_locations,
+        "MIN_MATCH_SCORE": min_match_score,
+    }
+
+
+_CONFIG = load_search_config(CONFIG_FILE)
+print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
+      f"exclude_titles={_CONFIG['EXCLUDE_TITLES']}, "
+      f"exclude_german_levels={_CONFIG['EXCLUDE_GERMAN_LEVELS']}, "
+      f"locations={_CONFIG['FETCH_LOCATIONS']}, "
+      f"min_match_score={_CONFIG['MIN_MATCH_SCORE']}")
+
+KEYWORDS = _CONFIG["KEYWORDS"]
+
+
+EXCLUDE_TITLE_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_TITLES"]]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
 # How many recent IDs to remember, as a tie-break safety net
@@ -63,8 +119,7 @@ RECENT_ID_CAP = 100
 RESULTS_PER_PAGE = 50
 
 
-MIN_MATCH_SCORE = 4
-
+MIN_MATCH_SCORE = _CONFIG["MIN_MATCH_SCORE"]
 
 GROQ_CALL_PACING_SECONDS = 8
 MAX_JOBS_SCORED_PER_RUN = 60
@@ -73,14 +128,16 @@ STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "combined.json"
 
 
-FETCH_LOCATIONS = [None, "Berlin"]  # None = no 'where' filter = whole country
+FETCH_LOCATIONS = _CONFIG["FETCH_LOCATIONS"]
 
 
 def label_for_job(job: dict) -> str:
-    """Pick the display label based on the job's actual location."""
-    display_name = job.get("location", {}).get("display_name", "")
-    if "berlin" in display_name.lower():
-        return "📍 Berlin"
+    """Pick a display label based on the job's actual location, checking
+    against whichever specific (non-nationwide) locations are configured."""
+    display_name = job.get("location", {}).get("display_name", "").lower()
+    for loc in FETCH_LOCATIONS:
+        if loc and loc.lower() in display_name:
+            return f"📍 {loc}"
     return "🇩🇪 Germany"
 
 
@@ -151,6 +208,7 @@ def fetch_jobs(location: str | None) -> list[dict]:
         time.sleep(0.3)  # be polite to Adzuna's rate limits
 
     return merged
+
 
 
 MAX_DESCRIPTION_CHARS = 2000
@@ -315,12 +373,7 @@ def enrich_description(job: dict) -> dict:
                 "german_context": extract_german_mentions(full_text_for_scan)}
 
     if "linkedin.com" in url.lower():
-        # LinkedIn is known to block/limit non-browser traffic and often
-        # shows only a truncated preview without login — flagging this in
-        # logs rather than adding LinkedIn-specific handling, so it's
-        # visible whether this is even a live issue (does Adzuna surface
-        # many LinkedIn listings?) and whether the generic fetch below
-        # happens to succeed anyway.
+
         print(f"DEBUG '{job.get('title')}' redirects to LinkedIn — "
               f"fetch may be blocked or return a login-walled preview")
 
@@ -344,7 +397,6 @@ def enrich_description(job: dict) -> dict:
             # Strategy 2: anchor-based text extraction from the raw page.
             text = _clean_html_fragment(resp.text)
             full_text_for_scan = text if len(text) > len(description) else description
-
 
             anchor = description[50:150].strip() if len(description) > 150 else description.strip()
             idx = text.find(anchor) if anchor else -1
@@ -425,6 +477,7 @@ def send_telegram(label: str, job: dict, match: dict) -> None:
     exp_line = ""
     if exp and exp.lower() != "not mentioned":
         exp_line = f"\n\n📅 Experience: {html.escape(exp)}"
+
 
     text = (
         f"{html.escape(label)} — New role\n\n"
@@ -524,7 +577,6 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
         "response_format": {"type": "json_object"},
     }
 
-
     max_attempts = 3
     max_retry_wait_seconds = 15
     resp = None
@@ -567,7 +619,11 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
     }
 
 
-_HARD_GERMAN_LEVEL_WORDS = ("c1", "c2", "fluent", "native")
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+_HARD_GERMAN_LEVEL_WORDS = tuple(_CONFIG["EXCLUDE_GERMAN_LEVELS"])
 
 
 def is_hard_german_requirement(german_requirement: str) -> bool:
@@ -591,6 +647,7 @@ def run() -> None:
     print(f"DEBUG loaded state from {STATE_FILE}: {state}")
     last_seen = parse_iso(state["last_seen_iso"])
     recent_ids = set(state["recent_ids"])
+
 
     all_jobs: dict[str, dict] = {}
     for location in FETCH_LOCATIONS:
@@ -632,6 +689,7 @@ def run() -> None:
 
             new_jobs.append(job)
 
+
     to_send = []
     for i, job in enumerate(new_jobs):
         label = label_for_job(job)
@@ -655,7 +713,8 @@ def run() -> None:
         try:
             match = score_job_match(job, description, german_context)
         except Exception as exc:  # noqa: BLE001
-
+            # A scoring failure should never block the job from being sent
+            # or block state persistence — fall back to no score shown.
             print(f"WARNING scoring failed for '{job.get('title')}': {exc}",
                   file=sys.stderr)
             match = {"match_score": None, "match_reason": "",
@@ -694,7 +753,6 @@ def run() -> None:
             print(f"ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
-
 
     ordered_recent = [str(j["id"]) for j in jobs if str(j.get("id")) in recent_ids]
     trimmed = ordered_recent[:RECENT_ID_CAP] if ordered_recent else list(recent_ids)[:RECENT_ID_CAP]
