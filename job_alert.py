@@ -10,6 +10,10 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
 ADZUNA_APP_ID = os.environ["ADZUNA_APP_ID"]
 ADZUNA_APP_KEY = os.environ["ADZUNA_APP_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -18,16 +22,10 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-GROQ_MODEL = "openai/gpt-oss-20b"
-
-
 CANDIDATE_PROFILE = os.environ["CANDIDATE_PROFILE"]
-
-ADZUNA_COUNTRY = "de"
 
 CONFIG_FILE = Path(__file__).parent / "search_config.txt"
 
-# Fallback defaults, used only if search_config.txt is missing 
 _DEFAULT_KEYWORDS = [
     "data scientist", "data science", "machine learning engineer",
     "ML engineer", "applied scientist", "research scientist", "data analyst",
@@ -40,6 +38,11 @@ _DEFAULT_EXCLUDE_TITLES = [
 _DEFAULT_EXCLUDE_GERMAN_LEVELS = ["c1", "c2", "fluent", "native"]
 _DEFAULT_LOCATIONS = ["Germany", "Berlin"]
 _DEFAULT_MIN_MATCH_SCORE = 4
+_DEFAULT_ADZUNA_COUNTRY = "de"
+_DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
+_DEFAULT_GROQ_CALL_PACING_SECONDS = 8
+_DEFAULT_MAX_JOBS_SCORED_PER_RUN = 60
+_DEFAULT_MAX_DESCRIPTION_CHARS = 2000
 
 
 def load_search_config(path: Path) -> dict:
@@ -56,6 +59,11 @@ def load_search_config(path: Path) -> dict:
         "EXCLUDE_GERMAN_LEVELS": [],
         "LOCATIONS": [],
         "MIN_MATCH_SCORE": [],
+        "ADZUNA_COUNTRY": [],
+        "GROQ_MODEL": [],
+        "GROQ_CALL_PACING_SECONDS": [],
+        "MAX_JOBS_SCORED_PER_RUN": [],
+        "MAX_DESCRIPTION_CHARS": [],
     }
 
     if not path.exists():
@@ -81,13 +89,26 @@ def load_search_config(path: Path) -> dict:
     exclude_german_levels = [w.lower() for w in result["EXCLUDE_GERMAN_LEVELS"]] or _DEFAULT_EXCLUDE_GERMAN_LEVELS
     locations = result["LOCATIONS"] or _DEFAULT_LOCATIONS
 
-    try:
-        min_match_score = int(result["MIN_MATCH_SCORE"][0])
-    except (IndexError, ValueError):
-        min_match_score = _DEFAULT_MIN_MATCH_SCORE
+    def _single_str(key: str, default: str) -> str:
+        return result[key][0].strip() if result[key] else default
 
-    # "Germany" (nationwide, no location filter) maps to None for the
-    # Adzuna 'where' param; anything else is passed through as-is.
+    def _single_int(key: str, default: int) -> int:
+        try:
+            return int(result[key][0])
+        except (IndexError, ValueError):
+            if result[key]:
+                print(f"WARNING invalid value for [{key}] in {path.name} "
+                      f"— using default {default}", file=sys.stderr)
+            return default
+
+    min_match_score = _single_int("MIN_MATCH_SCORE", _DEFAULT_MIN_MATCH_SCORE)
+    adzuna_country = _single_str("ADZUNA_COUNTRY", _DEFAULT_ADZUNA_COUNTRY).lower()
+    groq_model = _single_str("GROQ_MODEL", _DEFAULT_GROQ_MODEL)
+    groq_call_pacing_seconds = _single_int("GROQ_CALL_PACING_SECONDS", _DEFAULT_GROQ_CALL_PACING_SECONDS)
+    max_jobs_scored_per_run = _single_int("MAX_JOBS_SCORED_PER_RUN", _DEFAULT_MAX_JOBS_SCORED_PER_RUN)
+    max_description_chars = _single_int("MAX_DESCRIPTION_CHARS", _DEFAULT_MAX_DESCRIPTION_CHARS)
+
+
     fetch_locations = [None if loc.strip().lower() == "germany" else loc for loc in locations]
 
     return {
@@ -96,6 +117,11 @@ def load_search_config(path: Path) -> dict:
         "EXCLUDE_GERMAN_LEVELS": exclude_german_levels,
         "FETCH_LOCATIONS": fetch_locations,
         "MIN_MATCH_SCORE": min_match_score,
+        "ADZUNA_COUNTRY": adzuna_country,
+        "GROQ_MODEL": groq_model,
+        "GROQ_CALL_PACING_SECONDS": groq_call_pacing_seconds,
+        "MAX_JOBS_SCORED_PER_RUN": max_jobs_scored_per_run,
+        "MAX_DESCRIPTION_CHARS": max_description_chars,
     }
 
 
@@ -104,9 +130,26 @@ print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
       f"exclude_titles={_CONFIG['EXCLUDE_TITLES']}, "
       f"exclude_german_levels={_CONFIG['EXCLUDE_GERMAN_LEVELS']}, "
       f"locations={_CONFIG['FETCH_LOCATIONS']}, "
-      f"min_match_score={_CONFIG['MIN_MATCH_SCORE']}")
+      f"min_match_score={_CONFIG['MIN_MATCH_SCORE']}, "
+      f"adzuna_country={_CONFIG['ADZUNA_COUNTRY']}, "
+      f"groq_model={_CONFIG['GROQ_MODEL']}, "
+      f"groq_call_pacing_seconds={_CONFIG['GROQ_CALL_PACING_SECONDS']}, "
+      f"max_jobs_scored_per_run={_CONFIG['MAX_JOBS_SCORED_PER_RUN']}, "
+      f"max_description_chars={_CONFIG['MAX_DESCRIPTION_CHARS']}")
 
+ADZUNA_COUNTRY = _CONFIG["ADZUNA_COUNTRY"]
 KEYWORDS = _CONFIG["KEYWORDS"]
+
+
+MIN_MATCH_SCORE = _CONFIG["MIN_MATCH_SCORE"]
+
+
+GROQ_MODEL = _CONFIG["GROQ_MODEL"]
+
+
+GROQ_CALL_PACING_SECONDS = _CONFIG["GROQ_CALL_PACING_SECONDS"]
+MAX_JOBS_SCORED_PER_RUN = _CONFIG["MAX_JOBS_SCORED_PER_RUN"]
+MAX_DESCRIPTION_CHARS = _CONFIG["MAX_DESCRIPTION_CHARS"]
 
 
 EXCLUDE_TITLE_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_TITLES"]]
@@ -118,15 +161,8 @@ RECENT_ID_CAP = 100
 # Results per page to pull each run (Adzuna max is 50)
 RESULTS_PER_PAGE = 50
 
-
-MIN_MATCH_SCORE = _CONFIG["MIN_MATCH_SCORE"]
-
-GROQ_CALL_PACING_SECONDS = 8
-MAX_JOBS_SCORED_PER_RUN = 60
-
 STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "combined.json"
-
 
 FETCH_LOCATIONS = _CONFIG["FETCH_LOCATIONS"]
 
@@ -147,7 +183,6 @@ def should_exclude(job: dict) -> str | None:
 
     if _EXCLUDE_TITLE_RE.search(title):
         return "internship/working-student role"
-
 
     if job.get("contract_time") == "part_time":
         return "explicitly tagged part-time"
@@ -209,9 +244,6 @@ def fetch_jobs(location: str | None) -> list[dict]:
 
     return merged
 
-
-
-MAX_DESCRIPTION_CHARS = 2000
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
@@ -363,8 +395,6 @@ def enrich_description(job: dict) -> dict:
     description = job.get("description", "") or ""
     url = job.get("redirect_url", "")
 
-    # Fallback scan against whatever we have, in case the fetch below
-    # fails entirely — better than no German check at all.
     full_text_for_scan = description
     windowed_description = description
 
@@ -385,6 +415,7 @@ def enrich_description(job: dict) -> dict:
         )
         resp.raise_for_status()
 
+
         jsonld_desc = extract_jsonld_job_description(resp.text)
         if jsonld_desc and len(jsonld_desc) > len(description):
             full_text_for_scan = jsonld_desc
@@ -397,6 +428,7 @@ def enrich_description(job: dict) -> dict:
             # Strategy 2: anchor-based text extraction from the raw page.
             text = _clean_html_fragment(resp.text)
             full_text_for_scan = text if len(text) > len(description) else description
+
 
             anchor = description[50:150].strip() if len(description) > 150 else description.strip()
             idx = text.find(anchor) if anchor else -1
@@ -521,7 +553,6 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
     """
     title = job.get("title", "")
 
-
     german_section = (
         f"Excerpts from the posting that mention German:\n{german_context}"
         if german_context
@@ -576,6 +607,7 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
     }
+
 
     max_attempts = 3
     max_retry_wait_seconds = 15
@@ -648,7 +680,6 @@ def run() -> None:
     last_seen = parse_iso(state["last_seen_iso"])
     recent_ids = set(state["recent_ids"])
 
-
     all_jobs: dict[str, dict] = {}
     for location in FETCH_LOCATIONS:
         for job in fetch_jobs(location):
@@ -714,7 +745,6 @@ def run() -> None:
             match = score_job_match(job, description, german_context)
         except Exception as exc:  # noqa: BLE001
             # A scoring failure should never block the job from being sent
-            # or block state persistence — fall back to no score shown.
             print(f"WARNING scoring failed for '{job.get('title')}': {exc}",
                   file=sys.stderr)
             match = {"match_score": None, "match_reason": "",
@@ -749,11 +779,13 @@ def run() -> None:
             print(f"Sent alert ({label}): {job.get('title')} "
                   f"(match={match.get('match_score')})")
         except Exception as exc:  # noqa: BLE001
+            # Critical: never let one bad message crash the whole run —
 
             print(f"ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
+  
     ordered_recent = [str(j["id"]) for j in jobs if str(j.get("id")) in recent_ids]
     trimmed = ordered_recent[:RECENT_ID_CAP] if ordered_recent else list(recent_ids)[:RECENT_ID_CAP]
 
