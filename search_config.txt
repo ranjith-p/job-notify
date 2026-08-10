@@ -1,11 +1,6 @@
-# =============================================================================
 # Job alert search configuration
-#
-# Edit this file to customize what the bot searches for and filters out —
-# no Python knowledge needed. Lines starting with # are comments and are
-# ignored. Blank lines are ignored too. Each setting lives under its own
-# [SECTION] header; add or remove lines under a section to change it.
-#
+
+# Edit this file to customize what the bot searches for and filters 
 # After editing, commit and push this file — the next run picks it up
 # automatically.
 # =============================================================================
@@ -25,11 +20,8 @@ data analyst
 
 
 # ---------------------------------------------------------------------------
-# EXCLUDE_TITLES — if a job's title contains any of these (as a whole
-# word/phrase, case-insensitive), it's skipped entirely. One per line.
-# Matching is exact (no wildcard) so it stays predictable — list inflected
-# forms separately if needed (e.g. both "praktikant" and "praktikantin"
-# are included below).
+# EXCLUDE_TITLES — if a job's title contains any of these (as a whole word/phrase, case-insensitive), it's skipped entirely. One per line.
+# Matching is exact (no wildcard) so it stays predictable
 # ---------------------------------------------------------------------------
 [EXCLUDE_TITLES]
 praktikum
@@ -67,8 +59,9 @@ native
 # nationwide query's per-keyword result cutoff). One per line.
 # ---------------------------------------------------------------------------
 [LOCATIONS]
-Germany
 Berlin
+Germany
+
 
 
 # ---------------------------------------------------------------------------
@@ -78,3 +71,30 @@ Berlin
 # ---------------------------------------------------------------------------
 [MIN_MATCH_SCORE]
 4
+
+
+# ---------------------------------------------------------------------------
+# ADZUNA_COUNTRY — Adzuna's country code to search. "de" = Germany. See
+# https://developer.adzuna.com/docs/search for the full list of codes if
+# you want to search a different country instead (e.g. "gb", "us", "fr").
+# ---------------------------------------------------------------------------
+[ADZUNA_COUNTRY]
+de
+
+
+# ---------------------------------------------------------------------------
+# Groq model and search parameters — No need to update
+# ---------------------------------------------------------------------------
+[GROQ_MODEL]
+openai/gpt-oss-20b
+
+
+[GROQ_CALL_PACING_SECONDS]
+8
+
+
+[MAX_JOBS_SCORED_PER_RUN]
+60
+
+[MAX_DESCRIPTION_CHARS]
+2000
