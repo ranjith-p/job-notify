@@ -1,6 +1,6 @@
-# Data Science Job Alert Bot
+# Job Alert Bot
 
-Checks Adzuna every 10 minutes for new data science roles — one search
+Checks Adzuna every 15 minutes for new roles — one search
 covering all of Germany, one scoped to Berlin — and sends a Telegram
 message for each new listing. Runs entirely free on GitHub Actions.
 
