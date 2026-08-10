@@ -15,28 +15,18 @@ minutes.
 
 ## How it works
 
-```mermaid
-flowchart TD
-    A["⏰ cron-job.org<br/>fires every ~10 min"] -->|"calls GitHub's API"| B["GitHub Actions<br/>workflow_dispatch"]
-    B --> C{"Within your<br/>active hours?"}
-    C -->|"No"| Z["Skip this run"]
-    C -->|"Yes"| D["🔎 Search Adzuna<br/>(your keywords × your locations)"]
-    D --> E["Merge + dedupe<br/>against last-seen cursor"]
-    E --> F{"Genuinely<br/>new job?"}
-    F -->|"No"| G(["Ignored"])
-    F -->|"Yes"| H["Title / contract-type filters<br/>(search_config.txt)"]
-    H -->|"Excluded"| G
-    H -->|"Passes"| I["Fetch full posting page<br/>+ extract real description"]
-    I --> J["🧠 Groq LLM scoring<br/>match score · language check ·<br/>years of experience"]
-    J --> K{"Score & filters<br/>pass?"}
-    K -->|"No"| G
-    K -->|"Yes"| L["📲 Telegram message sent"]
-    E --> M["Save updated cursor"]
-    M --> N["Commit + push to GitHub"]
+```
+TRIGGER                SEARCH                 SCORE                  DELIVER
+           |                      |                      |                      |
+           v                      v                      v                      v
+cron-job.org fires     Query Adzuna for       Fetch full posting     Passes your
+on your schedule       your keywords          text                   thresholds?
+           |                      |                      |                      |
+           v                      v                      v                      v
+GitHub Actions runs    Dedupe + drop          Groq scores fit,       Yes -> Telegram
+the script             excluded titles        language, experience   No -> skip quietly
 
-    style A fill:#1f6feb,color:#fff
-    style L fill:#2ea043,color:#fff
-    style G fill:#6e7681,color:#fff
+Either way: the cursor is saved and pushed back to the repo, so nothing repeats.
 ```
 
 **Input**: your search config + your candidate profile.
