@@ -1,0 +1,93 @@
+# LinkedIn job alert search configuration
+#
+# Edit this file to customize what linkedin_alert.py searches for and
+# filters. After editing, commit and push — the next run picks it up
+# automatically. Same format as search_config.txt (used by job_alert.py /
+# Adzuna) — no ADZUNA_COUNTRY section here, not applicable to LinkedIn.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# KEYWORDS — job title/description phrases to search for (one per line).
+# Each is queried separately against LinkedIn's public search; results are
+# merged and deduplicated by job ID.
+# ---------------------------------------------------------------------------
+[KEYWORDS]
+data scientist
+data science
+machine learning engineer
+ML engineer
+applied scientist
+research scientist
+data analyst
+
+
+# ---------------------------------------------------------------------------
+# EXCLUDE_TITLES — if a job's title contains any of these (as a whole
+# word/phrase, case-insensitive), it's skipped entirely. One per line.
+# ---------------------------------------------------------------------------
+[EXCLUDE_TITLES]
+praktikum
+praktikant
+praktikantin
+werkstudent
+werkstudentin
+intern
+internship
+working student
+duales studium
+dual studium
+dual study
+software engineer
+data engineer
+
+
+# ---------------------------------------------------------------------------
+# EXCLUDE_GERMAN_LEVELS — job is skipped if the LLM determines German is a
+# MANDATORY requirement at one of these levels. One per line. Common
+# values: b1, b2, c1, c2, fluent, native. Jobs where German is mentioned
+# as optional/nice-to-have are never excluded, regardless of this list.
+# ---------------------------------------------------------------------------
+[EXCLUDE_GERMAN_LEVELS]
+c1
+c2
+fluent
+native
+
+
+# ---------------------------------------------------------------------------
+# LOCATIONS — passed directly to LinkedIn's location search field. One per
+# line. "Germany" searches nationwide; add specific cities too if you want
+# — since only page 1 (10 results) is fetched per keyword/location combo,
+# a city-specific search can catch listings a broad nationwide query's
+# top-10 cutoff might otherwise miss.
+# ---------------------------------------------------------------------------
+[LOCATIONS]
+Berlin, Germany
+Germany
+
+
+# ---------------------------------------------------------------------------
+# MIN_MATCH_SCORE — jobs scored below this (out of 10) by the LLM are
+# skipped. Single number, 1-10. Jobs where scoring itself failed are
+# still sent regardless of this setting.
+# ---------------------------------------------------------------------------
+[MIN_MATCH_SCORE]
+4
+
+
+# ---------------------------------------------------------------------------
+# Groq model and search parameters — No need to update
+# ---------------------------------------------------------------------------
+[GROQ_MODEL]
+openai/gpt-oss-20b
+
+
+[GROQ_CALL_PACING_SECONDS]
+8
+
+
+[MAX_JOBS_SCORED_PER_RUN]
+60
+
+[MAX_DESCRIPTION_CHARS]
+2000

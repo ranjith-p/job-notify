@@ -1,0 +1,97 @@
+name: LinkedIn Job Alert
+
+on:
+  workflow_dispatch: {}  # triggered by an external cron-job.org job calling
+                          # this via GitHub's API — see README. Use a LOWER
+                          # frequency than the Adzuna workflow's: this hits
+                          # LinkedIn's public, unauthenticated endpoint from a
+                          # GitHub-hosted (datacenter) IP, which is more likely
+                          # to get rate-limited/CAPTCHA'd than a residential
+                          # IP at high frequency. Hourly is a reasonable start.
+
+# Ensures only one run of THIS workflow executes at a time. A distinct group
+# from job-alert.yml's "job-alert-state" — the two workflows touch different
+# state files and can safely run concurrently with each other.
+concurrency:
+  group: linkedin-alert-state
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # needed so the workflow can commit updated state files
+
+jobs:
+  check-jobs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check active hours
+        id: hours
+        run: |
+          hour=$(date -u +%H)
+          # 9am-11pm CEST = 7-20 UTC (Berlin summer time). When Germany
+          # switches to CET in late October, change 7/20 to 6/19 below
+          # to keep the same local window.
+          if [ "$hour" -ge 7 ] && [ "$hour" -le 20 ]; then
+            echo "active=true" >> "$GITHUB_OUTPUT"
+            echo "Within active hours (UTC hour: $hour)."
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "Outside active hours (UTC hour: $hour) — skipping this run."
+          fi
+
+      - name: Check out repo
+        if: steps.hours.outputs.active == 'true'
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        if: steps.hours.outputs.active == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: steps.hours.outputs.active == 'true'
+        run: pip install -r requirements.txt
+
+      - name: Run LinkedIn alert script
+        if: steps.hours.outputs.active == 'true'
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CANDIDATE_PROFILE: ${{ secrets.CANDIDATE_PROFILE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python linkedin_alert.py
+
+      - name: Commit updated state
+        if: steps.hours.outputs.active == 'true'
+        run: |
+          echo "--- state file on disk after script ran ---"
+          cat state/linkedin.json
+          echo "--- git status before add ---"
+          git status
+          git config user.name "linkedin-alert-bot"
+          git config user.email "actions@github.com"
+          git add state/linkedin.json
+          echo "--- git status after add ---"
+          git status
+          echo "--- git diff --cached ---"
+          git diff --cached
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+          git commit -m "Update LinkedIn alert state [skip ci]"
+
+          # Retry pull-rebase + push a few times in case another run's
+          # push (this workflow or job-alert.yml's) landed in the same
+          # narrow window.
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push; then
+              echo "Push succeeded on attempt $attempt."
+              exit 0
+            fi
+            echo "Push attempt $attempt failed, retrying..."
+            sleep $((attempt * 5))
+          done
+
+          echo "Push failed after 3 attempts."
+          exit 1

@@ -1,10 +1,19 @@
 # Job Alert Bot
 
-A fully automated free job alert bot. It searches Adzuna on a schedule,
+A fully automated free job alert bot. It searches job sources on a schedule,
 filters out roles you don't want, scores each remaining job against your
 own profile using an LLM, and sends you a Telegram message for every
 genuinely new match - no manual searching, no daily digest email, no
 missed postings.
+
+Two independent sources, each its own GitHub Actions workflow, sharing the
+same Telegram bot, Groq key, and candidate profile:
+
+- **`job_alert.py`** / `job-alert.yml` — Adzuna's aggregator API (see below).
+- **`linkedin_alert.py`** / `linkedin-alert.yml` — LinkedIn's public job
+  search. See [LinkedIn source](#linkedin-source) further down for what's
+  different about it (notably: an IP-risk trade-off worth knowing before you
+  turn the frequency up).
 
 ## 🔎 Why Adzuna?
 
@@ -182,12 +191,14 @@ Add these five:
 | `TELEGRAM_BOT_TOKEN` | from step 2 |
 | `TELEGRAM_CHAT_ID` | from step 2 |
 
-### 5. Enable the workflow
+### 5. Enable the workflow(s)
 
-Go to the **Actions** tab in your repo → you should see "Data Science Job
-Alert" (the workflow's internal name - feel free to rename it in
-`job-alert.yml` to something more general) → click **Enable workflow**
-if prompted.
+Go to the **Actions** tab in your repo → you should see both **"Data
+Science Job Alert"** (Adzuna, `job-alert.yml`) and **"LinkedIn Job Alert"**
+(`linkedin-alert.yml`) → click **Enable workflow** on each if prompted.
+Only want one of the two? Just don't set up a cron-job.org entry for the
+other's `workflow_dispatch` URL below — leaving the workflow file in the
+repo but never triggering it costs nothing.
 
 ### 6. Set up the external scheduler (cron-job.org)
 
@@ -210,8 +221,11 @@ service to call `workflow_dispatch` via GitHub's API on a schedule.
 
 **Step B - set up cron-job.org:**
 
+The same PAT works for both workflows - create **two separate cron jobs**,
+one per workflow, since each dispatches a different `.yml` file:
+
 1. Go to https://cron-job.org/ and create a free account.
-2. Create a new cron job with these settings:
+2. Create a cron job for Adzuna:
    - **URL**:
      `https://api.github.com/repos/<your-username>/<your-repo>/actions/workflows/job-alert.yml/dispatches`
    - **Request method**: POST
@@ -223,28 +237,74 @@ service to call `workflow_dispatch` via GitHub's API on a schedule.
    - **Schedule**: every 10 minutes (or your preference), restricted to
      your active hours (cron-job.org supports timezone-aware schedules - set your local timezone and active window, and it handles daylight
      saving automatically without any manual UTC math).
-3. Save and enable the job. cron-job.org shows execution history, so you
-   can confirm it's actually firing and see GitHub's response.
+3. Create a **second** cron job for LinkedIn, identical except the URL ends
+   in `.../workflows/linkedin-alert.yml/dispatches` — and use a **lower
+   frequency**, e.g. every 60 minutes rather than every 10. See
+   [LinkedIn source](#linkedin-source) below for why: this one hits an
+   unauthenticated public endpoint from a shared GitHub-Actions IP range,
+   and a lower frequency keeps it closer to personal-use volume.
+4. Save and enable both jobs. cron-job.org shows execution history per job,
+   so you can confirm each is actually firing and see GitHub's response.
 
-The "Check active hours" step still exists inside the workflow itself as
+The "Check active hours" step still exists inside each workflow itself as
 a redundant safety net (in case the external schedule ever misfires
 outside your intended hours), but the real scheduling now lives in
 cron-job.org, not GitHub.
 
+## LinkedIn source
+
+`linkedin_alert.py` queries LinkedIn's public, unauthenticated
+`jobs-guest` search and detail endpoints — the same one the `linkedin-search`
+skill in `ai-job-search` uses, and the same approach a LinkedIn job-alert
+script running on your own PC via Task Scheduler would use. A few things
+that are specifically different from the Adzuna workflow:
+
+- **No official API, so no app credentials** - it doesn't need
+  `ADZUNA_APP_ID`/`ADZUNA_APP_KEY`. It reuses the same `GROQ_API_KEY`,
+  `CANDIDATE_PROFILE`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` secrets
+  as the Adzuna workflow - no extra secrets to add.
+- **Terms-of-Service caution** - automated access to this endpoint is
+  against LinkedIn's ToS. This is built for personal, low-volume use: only
+  page 1 (10 results) per keyword/location combo per run, most-recent-first
+  sorting, and a small delay between requests.
+- **Datacenter IP, not residential** - GitHub Actions runners execute from
+  well-known Azure/GitHub IP ranges. LinkedIn's guest endpoint may be more
+  inclined to rate-limit or CAPTCHA-wall a recognized datacenter IP than a
+  home IP hitting it at the same modest volume. If `linkedin_alert.py`'s
+  run logs start showing persistent fetch failures, that's the likely cause
+  - the fix is lowering the cron-job.org frequency further, not raising it.
+- **Own config file, own state file** - `linkedin_search_config.txt` (same
+  format as `search_config.txt`, no `ADZUNA_COUNTRY` section) and
+  `state/linkedin.json`, so tuning or resetting one source never touches
+  the other.
+- **Date only, no time-of-day** - LinkedIn's search cards expose a posting
+  date but never a time, so "Posted:" in LinkedIn alerts is date-only by
+  design, not a bug.
+- **First run** - unlike Adzuna's cursor (where you'd manually edit
+  `state/combined.json` to avoid an initial flood, per the note above),
+  `linkedin_alert.py` detects a fresh `state/linkedin.json` automatically:
+  it seeds every currently-open matching posting as a silent baseline and
+  sends one confirmation message, then only alerts on genuinely new
+  postings from the next run on. No manual edit needed.
+
 ## Tuning it
 
 - **Everything search-related** - keywords, exclusions, locations,
-  match threshold, Adzuna country, Groq model, and rate-limit pacing - lives in `search_config.txt` at the repo root. Plain text, no code
-  involved. Each setting lives under its own `[SECTION]` header; add or
-  remove lines to change it. Lines starting with `#` are comments.
-  Commit and push after editing; the next run picks it up automatically.
-  If the file is missing or a section is empty, the bot falls back to
-  sensible built-in defaults rather than failing.
-- **Your profile** (for match scoring): update the `CANDIDATE_PROFILE`
-  GitHub Secret - see step 1c above.
-- **Frequency**: handled by your cron-job.org schedule now, not GitHub's
+  match threshold, Adzuna country, Groq model, and rate-limit pacing - lives in `search_config.txt` (Adzuna) or `linkedin_search_config.txt`
+  (LinkedIn) at the repo root. Plain text, no code involved. Each setting
+  lives under its own `[SECTION]` header; add or remove lines to change it.
+  Lines starting with `#` are comments. Commit and push after editing; the
+  next run picks it up automatically. If a file is missing or a section is
+  empty, the bot falls back to sensible built-in defaults rather than
+  failing. The two files are independent - editing one never affects the
+  other source.
+- **Your profile** (for match scoring, both sources): update the
+  `CANDIDATE_PROFILE` GitHub Secret - see step 1c above.
+- **Frequency**: handled by your cron-job.org schedules now, not GitHub's
   native cron (see "Set up the external scheduler" above) - edit the
-  schedule there.
+  schedule there. Adzuna and LinkedIn have separate cron-job.org entries, so
+  you can run them at different frequencies (see the IP-risk note under
+  [LinkedIn source](#linkedin-source) for why LinkedIn's should stay lower).
 
 
 - **Making the repo public**: GitHub Actions minutes are unlimited/free
