@@ -7,13 +7,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
-
 import requests
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
+#Config
 ADZUNA_APP_ID = os.environ["ADZUNA_APP_ID"]
 ADZUNA_APP_KEY = os.environ["ADZUNA_APP_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
