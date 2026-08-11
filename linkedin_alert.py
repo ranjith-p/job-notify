@@ -23,12 +23,7 @@ CONFIG_FILE = Path(__file__).parent / "linkedin_search_config.txt"
 SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 DETAIL_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting"
 
-# LinkedIn's guest endpoint is unauthenticated and its ToS prohibits automated
-# access - ran from a residential IP this stayed under the radar at hourly
-# cadence; from a GitHub Actions runner (a known datacenter IP range) the same
-# pattern is more likely to get flagged. Keep this User-Agent, the small
-# per-request delay below, and a conservative external cron schedule (see
-# README) - this is personal-use, low-volume by design, not a bulk scraper.
+
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; linkedin-alert-bot/1.0; personal use)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
