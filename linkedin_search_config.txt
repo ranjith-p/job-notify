@@ -76,6 +76,18 @@ Germany
 
 
 # ---------------------------------------------------------------------------
+# MAX_POSTING_AGE_DAYS — a job is skipped (but still recorded as seen, so
+# it's not re-checked every run) if its LinkedIn-listed posting date is
+# older than this many days. LinkedIn's public search has no reliable
+# freshness filter, so a low-traffic keyword/location combo can surface a
+# genuinely old posting for the first time just because nothing newer has
+# pushed it off page 1 yet — this catches that case specifically.
+# ---------------------------------------------------------------------------
+[MAX_POSTING_AGE_DAYS]
+3
+
+
+# ---------------------------------------------------------------------------
 # Groq model and search parameters — No need to update
 # ---------------------------------------------------------------------------
 [GROQ_MODEL]

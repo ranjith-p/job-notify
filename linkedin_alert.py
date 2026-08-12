@@ -4,7 +4,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import requests
@@ -47,6 +47,14 @@ _DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 _DEFAULT_GROQ_CALL_PACING_SECONDS = 8
 _DEFAULT_MAX_JOBS_SCORED_PER_RUN = 60
 _DEFAULT_MAX_DESCRIPTION_CHARS = 2000
+# LinkedIn's search has no reliable time-window filter available to this
+# endpoint's public search, so a job can be brand new to OUR records (never
+# seen its ID before) while genuinely being days old - e.g. a low-traffic
+# keyword/location combo where nothing newer has pushed it off page 1 yet.
+# This age gate catches that: "new to us" and "recently posted" are checked
+# separately, and a job failing this one is still recorded as seen (so it's
+# not re-evaluated every run) but never sent.
+_DEFAULT_MAX_POSTING_AGE_DAYS = 3
 
 
 def load_search_config(path: Path) -> dict:
@@ -67,6 +75,7 @@ def load_search_config(path: Path) -> dict:
         "GROQ_CALL_PACING_SECONDS": [],
         "MAX_JOBS_SCORED_PER_RUN": [],
         "MAX_DESCRIPTION_CHARS": [],
+        "MAX_POSTING_AGE_DAYS": [],
     }
 
     if not path.exists():
@@ -109,6 +118,7 @@ def load_search_config(path: Path) -> dict:
     groq_call_pacing_seconds = _single_int("GROQ_CALL_PACING_SECONDS", _DEFAULT_GROQ_CALL_PACING_SECONDS)
     max_jobs_scored_per_run = _single_int("MAX_JOBS_SCORED_PER_RUN", _DEFAULT_MAX_JOBS_SCORED_PER_RUN)
     max_description_chars = _single_int("MAX_DESCRIPTION_CHARS", _DEFAULT_MAX_DESCRIPTION_CHARS)
+    max_posting_age_days = _single_int("MAX_POSTING_AGE_DAYS", _DEFAULT_MAX_POSTING_AGE_DAYS)
 
     return {
         "KEYWORDS": keywords,
@@ -116,6 +126,7 @@ def load_search_config(path: Path) -> dict:
         "EXCLUDE_GERMAN_LEVELS": exclude_german_levels,
         "LOCATIONS": locations,
         "MIN_MATCH_SCORE": min_match_score,
+        "MAX_POSTING_AGE_DAYS": max_posting_age_days,
         "GROQ_MODEL": groq_model,
         "GROQ_CALL_PACING_SECONDS": groq_call_pacing_seconds,
         "MAX_JOBS_SCORED_PER_RUN": max_jobs_scored_per_run,
@@ -129,6 +140,7 @@ print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
       f"exclude_german_levels={_CONFIG['EXCLUDE_GERMAN_LEVELS']}, "
       f"locations={_CONFIG['LOCATIONS']}, "
       f"min_match_score={_CONFIG['MIN_MATCH_SCORE']}, "
+      f"max_posting_age_days={_CONFIG['MAX_POSTING_AGE_DAYS']}, "
       f"groq_model={_CONFIG['GROQ_MODEL']}, "
       f"groq_call_pacing_seconds={_CONFIG['GROQ_CALL_PACING_SECONDS']}, "
       f"max_jobs_scored_per_run={_CONFIG['MAX_JOBS_SCORED_PER_RUN']}, "
@@ -137,6 +149,7 @@ print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
 KEYWORDS = _CONFIG["KEYWORDS"]
 LOCATIONS = _CONFIG["LOCATIONS"]
 MIN_MATCH_SCORE = _CONFIG["MIN_MATCH_SCORE"]
+MAX_POSTING_AGE_DAYS = _CONFIG["MAX_POSTING_AGE_DAYS"]
 GROQ_MODEL = _CONFIG["GROQ_MODEL"]
 GROQ_CALL_PACING_SECONDS = _CONFIG["GROQ_CALL_PACING_SECONDS"]
 MAX_JOBS_SCORED_PER_RUN = _CONFIG["MAX_JOBS_SCORED_PER_RUN"]
@@ -156,6 +169,28 @@ def should_exclude(title: str) -> str | None:
     if _EXCLUDE_TITLE_RE.search(title):
         return "internship/working-student role"
     return None
+
+
+def is_too_old(date_str: str | None, max_age_days: int) -> bool:
+    """True if the posting's date is older than max_age_days. A missing or
+    unparseable date is treated as NOT too old - better to show a job with
+    ambiguous age than silently drop it on a parsing edge case."""
+    if not date_str:
+        return False
+    try:
+        posted = parse_iso(date_str)
+    except ValueError:
+        return False
+    if posted.tzinfo is None:
+        # LinkedIn's search cards give a date only, e.g. "2026-08-09" - that
+        # parses as a naive datetime; treat it as UTC midnight rather than
+        # erroring on the subtraction below.
+        posted = posted.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - posted
+    # Compare the timedelta directly, not age.days - that property truncates
+    # to whole elapsed days, so "3 days and 1 hour old" would read as
+    # age.days == 3 and incorrectly pass a ">3 days" check.
+    return age > timedelta(days=max_age_days)
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +650,12 @@ def send_telegram(job: dict, match: dict) -> None:
 def run() -> None:
     state = load_state(STATE_FILE)
     print(f"DEBUG loaded state from {STATE_FILE}: {state}")
-    recent_ids = set(state["recent_ids"])
+    # Ordered dict, not a set: Python randomizes a set's iteration order
+    # between process runs (hash randomization), which broke the
+    # RECENT_ID_CAP trim below (list(a_set)[-100:] was dropping an
+    # effectively arbitrary batch of IDs, not the oldest ones). A dict
+    # preserves insertion order, so slicing its keys is meaningful.
+    recent_ids = dict.fromkeys(state["recent_ids"])
     is_first_run = not recent_ids and state.get("last_seen_iso") == "1970-01-01T00:00:00Z"
 
     jobs = fetch_jobs()
@@ -655,7 +695,12 @@ def run() -> None:
 
     to_send = []
     for i, job in enumerate(new_jobs):
-        recent_ids.add(job["id"])
+        recent_ids[job["id"]] = None
+
+        if is_too_old(job.get("date"), MAX_POSTING_AGE_DAYS):
+            print(f"Skipped (posting date {job.get('date')} older than "
+                  f"{MAX_POSTING_AGE_DAYS} days): {job['title']}")
+            continue
 
         exclude_reason = should_exclude(job["title"])
         if exclude_reason:
@@ -710,7 +755,11 @@ def run() -> None:
             print(f"ERROR sending Telegram message for '{job['title']}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
-    trimmed = list(recent_ids)[-RECENT_ID_CAP:] if len(recent_ids) > RECENT_ID_CAP else list(recent_ids)
+    # dict keys preserve insertion order, so this slice keeps the most
+    # recently-added RECENT_ID_CAP IDs (not an arbitrary batch - see the
+    # comment where recent_ids is built, above).
+    all_recent = list(recent_ids.keys())
+    trimmed = all_recent[-RECENT_ID_CAP:] if len(all_recent) > RECENT_ID_CAP else all_recent
     new_state = {
         "last_seen_iso": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "recent_ids": trimmed,
