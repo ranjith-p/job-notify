@@ -47,6 +47,16 @@ _DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 _DEFAULT_GROQ_CALL_PACING_SECONDS = 8
 _DEFAULT_MAX_JOBS_SCORED_PER_RUN = 60
 _DEFAULT_MAX_DESCRIPTION_CHARS = 2000
+# Each LinkedIn results page is 10 cards. Fetching only page 1 per
+# keyword/location combo caps visibility at the top 10 results for that
+# query - if a busy query already has 10 postings occupying that page
+# (whether by recency or LinkedIn's own relevance ranking; sortBy=DD is
+# requested but not independently verified as honored by this endpoint),
+# a genuinely new posting ranked 11th+ is invisible to this bot no matter
+# how recent it is. Raise this to look further down the results if new
+# postings keep getting missed; each extra page is one more request per
+# combo, so weigh it against request volume / IP risk (see README).
+_DEFAULT_PAGES_PER_QUERY = 2
 # LinkedIn's search has no reliable time-window filter available to this
 # endpoint's public search, so a job can be brand new to OUR records (never
 # seen its ID before) while genuinely being days old - e.g. a low-traffic
@@ -76,6 +86,7 @@ def load_search_config(path: Path) -> dict:
         "MAX_JOBS_SCORED_PER_RUN": [],
         "MAX_DESCRIPTION_CHARS": [],
         "MAX_POSTING_AGE_DAYS": [],
+        "PAGES_PER_QUERY": [],
     }
 
     if not path.exists():
@@ -119,6 +130,7 @@ def load_search_config(path: Path) -> dict:
     max_jobs_scored_per_run = _single_int("MAX_JOBS_SCORED_PER_RUN", _DEFAULT_MAX_JOBS_SCORED_PER_RUN)
     max_description_chars = _single_int("MAX_DESCRIPTION_CHARS", _DEFAULT_MAX_DESCRIPTION_CHARS)
     max_posting_age_days = _single_int("MAX_POSTING_AGE_DAYS", _DEFAULT_MAX_POSTING_AGE_DAYS)
+    pages_per_query = max(1, _single_int("PAGES_PER_QUERY", _DEFAULT_PAGES_PER_QUERY))
 
     return {
         "KEYWORDS": keywords,
@@ -131,6 +143,7 @@ def load_search_config(path: Path) -> dict:
         "GROQ_CALL_PACING_SECONDS": groq_call_pacing_seconds,
         "MAX_JOBS_SCORED_PER_RUN": max_jobs_scored_per_run,
         "MAX_DESCRIPTION_CHARS": max_description_chars,
+        "PAGES_PER_QUERY": pages_per_query,
     }
 
 
@@ -144,7 +157,8 @@ print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
       f"groq_model={_CONFIG['GROQ_MODEL']}, "
       f"groq_call_pacing_seconds={_CONFIG['GROQ_CALL_PACING_SECONDS']}, "
       f"max_jobs_scored_per_run={_CONFIG['MAX_JOBS_SCORED_PER_RUN']}, "
-      f"max_description_chars={_CONFIG['MAX_DESCRIPTION_CHARS']}")
+      f"max_description_chars={_CONFIG['MAX_DESCRIPTION_CHARS']}, "
+      f"pages_per_query={_CONFIG['PAGES_PER_QUERY']}")
 
 KEYWORDS = _CONFIG["KEYWORDS"]
 LOCATIONS = _CONFIG["LOCATIONS"]
@@ -154,6 +168,7 @@ GROQ_MODEL = _CONFIG["GROQ_MODEL"]
 GROQ_CALL_PACING_SECONDS = _CONFIG["GROQ_CALL_PACING_SECONDS"]
 MAX_JOBS_SCORED_PER_RUN = _CONFIG["MAX_JOBS_SCORED_PER_RUN"]
 MAX_DESCRIPTION_CHARS = _CONFIG["MAX_DESCRIPTION_CHARS"]
+PAGES_PER_QUERY = _CONFIG["PAGES_PER_QUERY"]
 
 EXCLUDE_TITLE_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_TITLES"]]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
@@ -244,15 +259,17 @@ def http_get_with_retry(url: str, max_retries: int = 3) -> requests.Response | N
     return None
 
 
-def build_search_url(query: str, location: str) -> str:
+def build_search_url(query: str, location: str, start: int = 0) -> str:
     params = {
         "keywords": query,
         "location": location,
-        "start": "0",
+        "start": str(start),
         # Most-recent-first (LinkedIn's default is relevance-ranked). With
-        # only page 1 (10 results) fetched per combo and no time filter, this
-        # matters: a stale-but-relevant posting could otherwise sit above a
-        # genuinely new one.
+        # a limited number of pages fetched per combo and no time filter,
+        # this matters: a stale-but-relevant posting could otherwise sit
+        # above a genuinely new one. (Not independently verified as
+        # actually honored server-side - the date logging in fetch_jobs
+        # below is there to check this if new postings keep being missed.)
         "sortBy": "DD",
     }
     return f"{SEARCH_URL}?{requests.compat.urlencode(params)}"
@@ -327,20 +344,34 @@ def parse_job_cards(page_html: str) -> list[dict]:
 
 
 def fetch_jobs() -> list[dict]:
-    """Query each keyword/location combo (page 1 only, most-recent-first),
-    merge and dedupe by job ID."""
+    """Query each keyword/location combo across PAGES_PER_QUERY pages
+    (10 results per page), merge and dedupe by job ID. Stops early for a
+    combo once a page comes back empty (LinkedIn has run out of results for
+    that query, no point requesting further pages)."""
     seen_ids = set()
     merged: list[dict] = []
     for location in LOCATIONS:
         for keyword in KEYWORDS:
-            resp = http_get_with_retry(build_search_url(keyword, location))
-            if resp is None:
-                continue
-            for card in parse_job_cards(resp.text):
-                if card["id"] not in seen_ids:
-                    seen_ids.add(card["id"])
-                    merged.append(card)
-            time.sleep(1.5)  # be polite - see the ToS note at the top of this file
+            combo_dates = []
+            for page in range(PAGES_PER_QUERY):
+                resp = http_get_with_retry(build_search_url(keyword, location, start=page * 10))
+                if resp is None:
+                    break
+                cards = parse_job_cards(resp.text)
+                if not cards:
+                    break  # no more results for this combo
+                for card in cards:
+                    combo_dates.append(card.get("date"))
+                    if card["id"] not in seen_ids:
+                        seen_ids.add(card["id"])
+                        merged.append(card)
+                time.sleep(1.5)  # be polite - see the ToS note at the top of this file
+            # Diagnostic: if sortBy=DD is actually honored, dates within a
+            # combo should be non-increasing (each page older than the last).
+            # If this print ever shows dates out of order, that's evidence
+            # the endpoint isn't sorting by date the way we're assuming.
+            print(f"DEBUG '{keyword}' @ '{location}': dates across "
+                  f"{len(combo_dates)} card(s) = {combo_dates}")
     return merged
 
 

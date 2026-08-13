@@ -88,6 +88,19 @@ Germany
 
 
 # ---------------------------------------------------------------------------
+# PAGES_PER_QUERY — how many results pages (10 jobs each) to fetch per
+# keyword/location combo, per run. Page 1 only means this bot can never see
+# past the top 10 results for a given query - if you're missing postings
+# that show up when you search LinkedIn yourself, raising this is the fix.
+# Each extra page is one more request per combo (7 keywords x 2 locations
+# x this number, per run) - weigh against request volume / IP risk, see
+# the "About the LinkedIn source" section in README.md.
+# ---------------------------------------------------------------------------
+[PAGES_PER_QUERY]
+2
+
+
+# ---------------------------------------------------------------------------
 # Groq model and search parameters — No need to update
 # ---------------------------------------------------------------------------
 [GROQ_MODEL]
