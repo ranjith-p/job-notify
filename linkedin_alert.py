@@ -173,8 +173,15 @@ PAGES_PER_QUERY = _CONFIG["PAGES_PER_QUERY"]
 EXCLUDE_TITLE_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_TITLES"]]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
-# How many recent IDs to remember, as a tie-break safety net
-RECENT_ID_CAP = 100
+# How many recent IDs to remember. This used to be 100, sized for when only
+# page 1 (~10 results/combo) was fetched. Since PAGES_PER_QUERY=2 roughly
+# doubled unique job churn per run, 100 was getting fully cycled out within
+# a couple of runs - a job dropped out of memory long before it actually
+# disappeared from LinkedIn's results, so it looked "new" again and got
+# re-sent as a duplicate. Sized generously here (a few thousand short numeric
+# IDs costs nothing meaningful in the state file) so memory comfortably
+# outlasts how long a posting stays visible, regardless of run frequency.
+RECENT_ID_CAP = 3000
 
 STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "linkedin.json"
