@@ -83,14 +83,24 @@ de
 
 
 # ---------------------------------------------------------------------------
-# Groq model and search parameters — No need to update
+# Groq model and search parameters
+#
+# NOTE: openai/gpt-oss-20b's free tier is 30 requests/min, 1,000 requests/
+# DAY, 8,000 tokens/min - and that budget is SHARED with linkedin_alert.py,
+# since both scripts use the same GROQ_API_KEY. Running this workflow very
+# frequently (e.g. every 10 min = up to 144 runs/day) eats into that shared
+# daily budget fast, especially alongside the LinkedIn workflow's own usage.
+# If you see "Groq quota exhausted" warnings in the Action logs, the fix is
+# a less frequent cron-job.org schedule for one or both workflows, not a
+# bigger GROQ_CALL_PACING_SECONDS - that only paces requests within a single
+# run, it can't stretch a 1,000/day cap that both scripts draw from.
 # ---------------------------------------------------------------------------
 [GROQ_MODEL]
 openai/gpt-oss-20b
 
 
 [GROQ_CALL_PACING_SECONDS]
-8
+15
 
 
 [MAX_JOBS_SCORED_PER_RUN]

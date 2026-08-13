@@ -44,7 +44,7 @@ _DEFAULT_EXCLUDE_GERMAN_LEVELS = ["c1", "c2", "fluent", "native"]
 _DEFAULT_LOCATIONS = ["Berlin, Germany", "Germany"]
 _DEFAULT_MIN_MATCH_SCORE = 4
 _DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
-_DEFAULT_GROQ_CALL_PACING_SECONDS = 8
+_DEFAULT_GROQ_CALL_PACING_SECONDS = 15
 _DEFAULT_MAX_JOBS_SCORED_PER_RUN = 60
 _DEFAULT_MAX_DESCRIPTION_CHARS = 2000
 # Each LinkedIn results page is 10 cards. Fetching only page 1 per
@@ -494,6 +494,18 @@ def enrich_description(job: dict) -> dict:
 # Groq scoring - same prompt schema and retry strategy as job_alert.py
 # ---------------------------------------------------------------------------
 
+class GroqQuotaExhausted(Exception):
+    """Raised instead of a generic HTTP error when Groq's rate limit is
+    exhausted badly enough that continuing to call it in this run is
+    pointless. Groq's free tier for this model is a small SHARED daily
+    budget (1,000 requests/day, 8,000 tokens/minute at time of writing) -
+    shared with job_alert.py too, since both scripts use the same
+    GROQ_API_KEY. A long suggested wait almost always means that daily
+    budget, not just a per-minute burst, is exhausted - every remaining
+    job this run would fail the same way, so run() stops calling Groq
+    entirely for the rest of this run on this, rather than skip job-by-job."""
+
+
 def score_job_match(job: dict, description: str, german_context: str) -> dict:
     title = job.get("title", "")
 
@@ -566,13 +578,15 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
             break
         retry_after = float(resp.headers.get("Retry-After", 2 * attempt))
         if retry_after > max_retry_wait_seconds:
-            print(f"Groq rate-limited, suggested wait {retry_after}s exceeds "
-                  f"cap of {max_retry_wait_seconds}s — giving up on this "
-                  f"job's score rather than waiting", file=sys.stderr)
-            break
+            raise GroqQuotaExhausted(
+                f"suggested wait {retry_after:.0f}s exceeds the {max_retry_wait_seconds}s cap"
+            )
         print(f"Groq rate-limited (attempt {attempt}/{max_attempts}), "
               f"waiting {retry_after}s", file=sys.stderr)
         time.sleep(retry_after)
+
+    if resp.status_code == 429:
+        raise GroqQuotaExhausted(f"still rate-limited after {max_attempts} attempts")
 
     resp.raise_for_status()
     raw = resp.json()["choices"][0]["message"]["content"]
@@ -726,6 +740,18 @@ def run() -> None:
 
     to_send = []
     for i, job in enumerate(new_jobs):
+        if i >= MAX_JOBS_SCORED_PER_RUN:
+            # Deliberately do NOT mark this job as seen and do NOT send it
+            # unscored - previously this cap sent a bare, score-less message
+            # AND permanently marked the job seen (so it could never be
+            # properly evaluated even in a later run). Leaving it out of
+            # recent_ids means it's still "new" next run and gets a real
+            # score then, instead of being sent with no fit assessment or
+            # silently lost.
+            print(f"Deferring '{job['title']}' to a future run — per-run "
+                  f"scoring cap ({MAX_JOBS_SCORED_PER_RUN}) reached")
+            continue
+
         recent_ids[job["id"]] = None
 
         if is_too_old(job.get("date"), MAX_POSTING_AGE_DAYS):
@@ -738,14 +764,6 @@ def run() -> None:
             print(f"Skipped ({exclude_reason}): {job['title']}")
             continue
 
-        if i >= MAX_JOBS_SCORED_PER_RUN:
-            print(f"Skipping score for '{job['title']}' — per-run scoring "
-                  f"cap ({MAX_JOBS_SCORED_PER_RUN}) reached")
-            match = {"match_score": None, "match_reason": "",
-                     "german_requirement": "Unknown", "years_experience": "Not mentioned"}
-            to_send.append((job, match))
-            continue
-
         enriched = enrich_description(job)
         description = enriched["description"]
         german_context = enriched["german_context"]
@@ -755,6 +773,20 @@ def run() -> None:
 
         try:
             match = score_job_match(job, description, german_context)
+        except GroqQuotaExhausted as exc:
+            # Every remaining job this run would fail the same way (see the
+            # class docstring) - stop calling Groq for the rest of this run.
+            # Unlike the per-run cap above, this job and everything after it
+            # in new_jobs is simply left out of recent_ids entirely (not
+            # sent, not marked seen), so all of it is properly re-evaluated
+            # - with a real score - on the next run instead of being lost
+            # or sent blank.
+            recent_ids.pop(job["id"], None)
+            remaining = len(new_jobs) - i
+            print(f"WARNING Groq quota exhausted ({exc}) — stopping scoring "
+                  f"for the rest of this run; {remaining} job(s) deferred "
+                  f"to next run", file=sys.stderr)
+            break
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING scoring failed for '{job['title']}': {exc}", file=sys.stderr)
             match = {"match_score": None, "match_reason": "",

@@ -36,7 +36,7 @@ _DEFAULT_LOCATIONS = ["Germany", "Berlin"]
 _DEFAULT_MIN_MATCH_SCORE = 4
 _DEFAULT_ADZUNA_COUNTRY = "de"
 _DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
-_DEFAULT_GROQ_CALL_PACING_SECONDS = 8
+_DEFAULT_GROQ_CALL_PACING_SECONDS = 15
 _DEFAULT_MAX_JOBS_SCORED_PER_RUN = 60
 _DEFAULT_MAX_DESCRIPTION_CHARS = 2000
 
@@ -533,6 +533,13 @@ def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
+class GroqQuotaExhausted(Exception):
+    """Raised instead of a generic HTTP error when Groq's rate limit is
+    exhausted badly enough that continuing to call it in this run is
+    pointless (see the 429 handling below). Callers should stop scoring
+    for the rest of the run on this, not just skip the one job."""
+
+
 def score_job_match(job: dict, description: str, german_context: str) -> dict:
     """
     Ask Groq to score how well this job matches the candidate profile,
@@ -543,9 +550,12 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
 
     Returns a dict like:
         {"match_score": 8, "match_reason": "...", "german_requirement": "..."}
-    On any failure, returns a safe fallback dict rather than raising —
-    callers should never let a scoring failure block sending the job or
-    persisting state.
+    Raises GroqQuotaExhausted if the rate limit looks exhausted for a
+    while, rather than the generic HTTPError requests.raise_for_status()
+    would give - see run() for how that's handled. Any other failure
+    (network error, malformed JSON, etc.) still propagates as a normal
+    exception; callers should never let those block sending the job or
+    persisting state either, but they don't warrant stopping the whole run.
     """
     title = job.get("title", "")
 
@@ -619,13 +629,23 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
             break
         retry_after = float(resp.headers.get("Retry-After", 2 * attempt))
         if retry_after > max_retry_wait_seconds:
-            print(f"Groq rate-limited, suggested wait {retry_after}s exceeds "
-                  f"cap of {max_retry_wait_seconds}s — giving up on this "
-                  f"job's score rather than waiting", file=sys.stderr)
-            break
+            # A short suggested wait is a normal per-minute (TPM/RPM) blip and
+            # worth a quick retry. A wait this long means a bigger window is
+            # exhausted (most likely RPD - Requests Per Day, shared across
+            # every script using this same Groq key) - retrying or waiting
+            # won't help within this run, and every further job in this run
+            # would just fail the same way. Raise a distinct exception so the
+            # caller can stop scoring entirely for the rest of this run,
+            # rather than burning through (and failing) every remaining job.
+            raise GroqQuotaExhausted(
+                f"suggested wait {retry_after:.0f}s exceeds the {max_retry_wait_seconds}s cap"
+            )
         print(f"Groq rate-limited (attempt {attempt}/{max_attempts}), "
               f"waiting {retry_after}s", file=sys.stderr)
         time.sleep(retry_after)
+
+    if resp.status_code == 429:
+        raise GroqQuotaExhausted(f"still rate-limited after {max_attempts} attempts")
 
     resp.raise_for_status()
     raw = resp.json()["choices"][0]["message"]["content"]
@@ -739,6 +759,26 @@ def run() -> None:
 
         try:
             match = score_job_match(job, description, german_context)
+        except GroqQuotaExhausted as exc:
+            # Every remaining job this run would fail the same way (see the
+            # class docstring) - stop calling Groq entirely for the rest of
+            # this run instead of burning through more failed requests.
+            # Note: because this script's dedup marks a job "seen" and
+            # advances the cursor at identification time (the loop above,
+            # before scoring is ever attempted), any job past this point
+            # in new_jobs is still sent unscored in Pass 2 below - stopping
+            # here only prevents *wasted Groq calls*, it doesn't rescue
+            # those jobs a score. Ask about restructuring that if this
+            # keeps happening.
+            print(f"WARNING Groq quota exhausted ({exc}) — stopping scoring "
+                  f"for the rest of this run ({len(new_jobs) - i - 1} job(s) "
+                  f"will be sent without a score)", file=sys.stderr)
+            for remaining_job in new_jobs[i:]:
+                to_send.append((remaining_job, label_for_job(remaining_job), {
+                    "match_score": None, "match_reason": "",
+                    "german_requirement": "Unknown", "years_experience": "Not mentioned",
+                }))
+            break
         except Exception as exc:  # noqa: BLE001
             # A scoring failure should never block the job from being sent
             print(f"WARNING scoring failed for '{job.get('title')}': {exc}",
