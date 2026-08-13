@@ -627,25 +627,35 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
         )
         if resp.status_code != 429:
             break
+
+        # Groq's x-ratelimit-remaining-requests header always reflects the
+        # DAILY (RPD) budget specifically - this is the one genuinely shared
+        # with linkedin_alert.py and worth stopping the whole run over. A
+        # long Retry-After alone is NOT reliable evidence of that: a normal
+        # per-minute (TPM/RPM) refill can also suggest a wait of 15-30+
+        # seconds, and treating every long wait as "the whole run is doomed"
+        # was wrongly killing every remaining job over what was often just
+        # this one job's transient burst.
+        remaining_requests = (resp.headers.get("x-ratelimit-remaining-requests") or "").strip()
+        if remaining_requests == "0":
+            reset = resp.headers.get("x-ratelimit-reset-requests", "unknown")
+            raise GroqQuotaExhausted(
+                f"daily request quota (RPD) exhausted, resets in {reset}"
+            )
+
         retry_after = float(resp.headers.get("Retry-After", 2 * attempt))
         if retry_after > max_retry_wait_seconds:
-            # A short suggested wait is a normal per-minute (TPM/RPM) blip and
-            # worth a quick retry. A wait this long means a bigger window is
-            # exhausted (most likely RPD - Requests Per Day, shared across
-            # every script using this same Groq key) - retrying or waiting
-            # won't help within this run, and every further job in this run
-            # would just fail the same way. Raise a distinct exception so the
-            # caller can stop scoring entirely for the rest of this run,
-            # rather than burning through (and failing) every remaining job.
-            raise GroqQuotaExhausted(
-                f"suggested wait {retry_after:.0f}s exceeds the {max_retry_wait_seconds}s cap"
-            )
+            # Daily quota isn't exhausted (checked above) - this is just a
+            # stubborn per-minute blip on this one job. Give up on THIS job
+            # only; falls through to resp.raise_for_status() below, which
+            # the caller already treats as an ordinary single-job failure.
+            print(f"Groq rate-limited (per-minute burst, not the daily quota), "
+                  f"suggested wait {retry_after:.0f}s exceeds {max_retry_wait_seconds}s "
+                  f"— giving up on just this job's score", file=sys.stderr)
+            break
         print(f"Groq rate-limited (attempt {attempt}/{max_attempts}), "
               f"waiting {retry_after}s", file=sys.stderr)
         time.sleep(retry_after)
-
-    if resp.status_code == 429:
-        raise GroqQuotaExhausted(f"still rate-limited after {max_attempts} attempts")
 
     resp.raise_for_status()
     raw = resp.json()["choices"][0]["message"]["content"]
