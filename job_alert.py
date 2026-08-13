@@ -754,7 +754,18 @@ def run() -> None:
     state = load_state(STATE_FILE)
     print(f"DEBUG loaded state from {STATE_FILE}: {state}")
     last_seen = parse_iso(state["last_seen_iso"])
-    recent_ids = set(state["recent_ids"])
+    # Ordered list (oldest -> newest) for reliable FIFO retention across
+    # runs, plus a set mirror for fast membership checks. The previous
+    # approach filtered recent_ids down to only IDs that ALSO appeared in
+    # the current run's Adzuna fetch before trimming — which silently
+    # dropped legitimately-recent IDs the moment they aged out of
+    # Adzuna's top-N-per-keyword window (often within a single run),
+    # making the safety net nearly useless. This caused exact-duplicate
+    # resends when a source bumped/refreshed a listing's timestamp
+    # without changing its ID/URL: the time-based check alone couldn't
+    # catch it, and the leaky ID-based backup had already forgotten the ID.
+    recent_ids_list = list(state["recent_ids"])
+    recent_ids_set = set(recent_ids_list)
 
     # Fetch both scopes and merge into one deduped list, keyed by job id —
     # this is what makes a Berlin job (which matches both queries) get
@@ -779,10 +790,11 @@ def run() -> None:
         created_dt = parse_iso(created)
 
         is_new_by_time = created_dt > last_seen
-        is_new_by_id = job_id not in recent_ids
+        is_new_by_id = job_id not in recent_ids_set
 
         if is_new_by_time and is_new_by_id:
-            recent_ids.add(job_id)
+            recent_ids_set.add(job_id)
+            recent_ids_list.append(job_id)
             # Clamp to "now" — job boards occasionally report bogus future
             # 'created' timestamps (reposts/bumps, clock mismatches on the
             # source's end). If we let that poison the cursor, a genuinely
@@ -878,11 +890,11 @@ def run() -> None:
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
-    # Trim recent_ids to the cap (keep most recently added — since sets
-    # don't preserve order, just cap by re-deriving from the current jobs
-    # payload order, newest first).
-    ordered_recent = [str(j["id"]) for j in jobs if str(j.get("id")) in recent_ids]
-    trimmed = ordered_recent[:RECENT_ID_CAP] if ordered_recent else list(recent_ids)[:RECENT_ID_CAP]
+    # Trim to the cap, keeping the most recently added (FIFO eviction of
+    # the oldest) — independent of whether an ID happens to appear in
+    # this run's Adzuna fetch, so a legitimately-recent ID can't be
+    # silently forgotten just because it aged out of one run's results.
+    trimmed = recent_ids_list[-RECENT_ID_CAP:]
 
     new_state = {
         "last_seen_iso": newest_iso,
