@@ -110,7 +110,7 @@ openai/gpt-oss-20b
 # still seeing rate-limit warnings in the logs.
 # ---------------------------------------------------------------------------
 [GROQ_CALL_PACING_SECONDS]
-8
+20
 
 
 # ---------------------------------------------------------------------------
@@ -131,4 +131,4 @@ openai/gpt-oss-20b
 # Raise this if you're on a paid tier and want richer context per call.
 # ---------------------------------------------------------------------------
 [MAX_DESCRIPTION_CHARS]
-2000
+1500
