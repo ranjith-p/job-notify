@@ -142,33 +142,17 @@ print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
 ADZUNA_COUNTRY = _CONFIG["ADZUNA_COUNTRY"]
 KEYWORDS = _CONFIG["KEYWORDS"]
 
-# Jobs scored below this are skipped. Jobs where scoring itself failed
-# (match_score is None) are still sent — a scoring failure shouldn't
-# compound into also hiding the job.
 MIN_MATCH_SCORE = _CONFIG["MIN_MATCH_SCORE"]
 
-# llama-3.1-8b-instant and llama-3.3-70b-versatile were deprecated by Groq
-# on 2026-06-17. gpt-oss-20b (the default) is fast with high rate-limit
-# headroom on the free tier — the larger -120b has much tighter limits,
-# which combined with long descriptions caused 10+ minute rate-limit
-# waits per job in testing. Change via [GROQ_MODEL] in search_config.txt
-# if you're on a paid tier or want to experiment.
+
 GROQ_MODEL = _CONFIG["GROQ_MODEL"]
 
-# Groq's free tier for gpt-oss-20b: 30 requests/min, ~6,000-8,000
-# tokens/min, 1,000 requests/DAY (confirmed via Groq's published limits).
-# These three are tuned to stay within that on the free tier — loosen
-# them via search_config.txt if you're on a paid tier with higher limits.
+
 GROQ_CALL_PACING_SECONDS = _CONFIG["GROQ_CALL_PACING_SECONDS"]
 MAX_JOBS_SCORED_PER_RUN = _CONFIG["MAX_JOBS_SCORED_PER_RUN"]
 MAX_DESCRIPTION_CHARS = _CONFIG["MAX_DESCRIPTION_CHARS"]
 
-# Title keywords that mean "skip this" — internships / working-student /
-# similar non-full-employee roles. Exact word/phrase, word-boundary
-# matched, case-insensitive — deliberately no wildcard suffix, since that
-# would risk matches like "intern" inside "international". List inflected
-# forms (e.g. both "praktikant" and "praktikantin") as separate lines in
-# search_config.txt if you want them covered.
+
 EXCLUDE_TITLE_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_TITLES"]]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
@@ -181,11 +165,7 @@ RESULTS_PER_PAGE = 50
 STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "combined.json"
 
-# Which scopes to query — read from search_config.txt's [LOCATIONS]
-# section ("Germany" = nationwide, no location filter; anything else is
-# passed to Adzuna's 'where' param as-is). Querying multiple overlapping
-# scopes (e.g. nationwide + a specific city) catches listings that a
-# broad query's per-keyword result cutoff might otherwise crowd out.
+
 FETCH_LOCATIONS = _CONFIG["FETCH_LOCATIONS"]
 
 
@@ -206,11 +186,7 @@ def should_exclude(job: dict) -> str | None:
     if _EXCLUDE_TITLE_RE.search(title):
         return "internship/working-student role"
 
-    # Adzuna's contract_time/contract_type fields are only populated for a
-    # minority of German listings — requiring full_time=1 silently dropped
-    # every untagged posting too. Instead, only exclude jobs EXPLICITLY
-    # tagged part-time or contract/temporary; untagged jobs (the majority)
-    # are kept rather than assumed to be excluded.
+
     if job.get("contract_time") == "part_time":
         return "explicitly tagged part-time"
 
