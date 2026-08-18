@@ -1,6 +1,6 @@
 # Job Alert Bot
 
-A free, fully automated job alert. It checks for new job postings on a
+A fully automated free job alert. It checks for new job postings on a
 schedule, throws out roles you don't want, uses AI to judge how well each
 remaining job actually fits your background, and sends you a Telegram
 message for every genuinely new match. No manual searching, no daily
