@@ -27,10 +27,7 @@ CANDIDATE_PROFILE = os.environ["CANDIDATE_PROFILE"]
 
 CONFIG_FILE = Path(__file__).parent / "search_config.txt"
 
-# Fallback defaults, used only if search_config.txt is missing or a
-# section within it is empty/missing — normal operation reads everything
-# from that file so users can customize search behavior without touching
-# this script at all.
+
 _DEFAULT_KEYWORDS = [
     "data scientist", "data science", "machine learning engineer",
     "ML engineer", "applied scientist", "research scientist", "data analyst",
@@ -113,8 +110,7 @@ def load_search_config(path: Path) -> dict:
     max_jobs_scored_per_run = _single_int("MAX_JOBS_SCORED_PER_RUN", _DEFAULT_MAX_JOBS_SCORED_PER_RUN)
     max_description_chars = _single_int("MAX_DESCRIPTION_CHARS", _DEFAULT_MAX_DESCRIPTION_CHARS)
 
-    # "Germany" (nationwide, no location filter) maps to None for the
-    # Adzuna 'where' param; anything else is passed through as-is.
+
     fetch_locations = [None if loc.strip().lower() == "germany" else loc for loc in locations]
 
     return {
