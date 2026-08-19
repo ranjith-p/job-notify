@@ -1,3 +1,18 @@
+"""
+Data science job alert bot.
+
+Fetches Germany-wide AND Berlin-scoped Adzuna results (the Berlin-specific
+query catches listings that fall outside the top-50-per-keyword cutoff on
+the broader Germany-wide query), merges them into a single deduped list,
+and runs ONE unified new/seen cursor across everything. Each job is
+scored and sent exactly once, labeled 🇩🇪 Germany or 📍 Berlin based on
+its actual location — this avoids the double-scoring/double-sending that
+happened when Germany and Berlin were tracked as two independent searches
+with separate state.
+
+State is stored in state/combined.json so it persists between runs (the
+GitHub Actions workflow commits this back to the repo).
+"""
 
 import html
 import json
@@ -23,11 +38,18 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+# Loaded from a GitHub Secret rather than hardcoded, so your career/resume
+# details aren't exposed if this repo is public. See README for setup —
+# the raw text (same content as before) goes into a CANDIDATE_PROFILE
+# secret, not into this file.
 CANDIDATE_PROFILE = os.environ["CANDIDATE_PROFILE"]
 
 CONFIG_FILE = Path(__file__).parent / "search_config.txt"
 
-
+# Fallback defaults, used only if search_config.txt is missing or a
+# section within it is empty/missing — normal operation reads everything
+# from that file so users can customize search behavior without touching
+# this script at all.
 _DEFAULT_KEYWORDS = [
     "data scientist", "data science", "machine learning engineer",
     "ML engineer", "applied scientist", "research scientist", "data analyst",
@@ -37,6 +59,7 @@ _DEFAULT_EXCLUDE_TITLES = [
     "working student", "duales studium", "dual study", "software engineer",
     "data engineer",
 ]
+_DEFAULT_EXCLUDE_COMPANIES: list[str] = []
 _DEFAULT_EXCLUDE_GERMAN_LEVELS = ["c1", "c2", "fluent", "native"]
 _DEFAULT_LOCATIONS = ["Germany", "Berlin"]
 _DEFAULT_MIN_MATCH_SCORE = 4
@@ -58,6 +81,7 @@ def load_search_config(path: Path) -> dict:
     result = {
         "KEYWORDS": [],
         "EXCLUDE_TITLES": [],
+        "EXCLUDE_COMPANIES": [],
         "EXCLUDE_GERMAN_LEVELS": [],
         "LOCATIONS": [],
         "MIN_MATCH_SCORE": [],
@@ -88,6 +112,7 @@ def load_search_config(path: Path) -> dict:
 
     keywords = result["KEYWORDS"] or _DEFAULT_KEYWORDS
     exclude_titles = result["EXCLUDE_TITLES"] or _DEFAULT_EXCLUDE_TITLES
+    exclude_companies = result["EXCLUDE_COMPANIES"] or _DEFAULT_EXCLUDE_COMPANIES
     exclude_german_levels = [w.lower() for w in result["EXCLUDE_GERMAN_LEVELS"]] or _DEFAULT_EXCLUDE_GERMAN_LEVELS
     locations = result["LOCATIONS"] or _DEFAULT_LOCATIONS
 
@@ -110,12 +135,14 @@ def load_search_config(path: Path) -> dict:
     max_jobs_scored_per_run = _single_int("MAX_JOBS_SCORED_PER_RUN", _DEFAULT_MAX_JOBS_SCORED_PER_RUN)
     max_description_chars = _single_int("MAX_DESCRIPTION_CHARS", _DEFAULT_MAX_DESCRIPTION_CHARS)
 
-
+    # "Germany" (nationwide, no location filter) maps to None for the
+    # Adzuna 'where' param; anything else is passed through as-is.
     fetch_locations = [None if loc.strip().lower() == "germany" else loc for loc in locations]
 
     return {
         "KEYWORDS": keywords,
         "EXCLUDE_TITLES": exclude_titles,
+        "EXCLUDE_COMPANIES": exclude_companies,
         "EXCLUDE_GERMAN_LEVELS": exclude_german_levels,
         "FETCH_LOCATIONS": fetch_locations,
         "MIN_MATCH_SCORE": min_match_score,
@@ -130,6 +157,7 @@ def load_search_config(path: Path) -> dict:
 _CONFIG = load_search_config(CONFIG_FILE)
 print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
       f"exclude_titles={_CONFIG['EXCLUDE_TITLES']}, "
+      f"exclude_companies={_CONFIG['EXCLUDE_COMPANIES']}, "
       f"exclude_german_levels={_CONFIG['EXCLUDE_GERMAN_LEVELS']}, "
       f"locations={_CONFIG['FETCH_LOCATIONS']}, "
       f"min_match_score={_CONFIG['MIN_MATCH_SCORE']}, "
@@ -142,19 +170,41 @@ print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
 ADZUNA_COUNTRY = _CONFIG["ADZUNA_COUNTRY"]
 KEYWORDS = _CONFIG["KEYWORDS"]
 
+# Jobs scored below this are skipped. Jobs where scoring itself failed
+# (match_score is None) are still sent — a scoring failure shouldn't
+# compound into also hiding the job.
 MIN_MATCH_SCORE = _CONFIG["MIN_MATCH_SCORE"]
 
-
+# llama-3.1-8b-instant and llama-3.3-70b-versatile were deprecated by Groq
+# on 2026-06-17. gpt-oss-20b (the default) is fast with high rate-limit
+# headroom on the free tier — the larger -120b has much tighter limits,
+# which combined with long descriptions caused 10+ minute rate-limit
+# waits per job in testing. Change via [GROQ_MODEL] in search_config.txt
+# if you're on a paid tier or want to experiment.
 GROQ_MODEL = _CONFIG["GROQ_MODEL"]
 
-
+# Groq's free tier for gpt-oss-20b: 30 requests/min, ~6,000-8,000
+# tokens/min, 1,000 requests/DAY (confirmed via Groq's published limits).
+# These three are tuned to stay within that on the free tier — loosen
+# them via search_config.txt if you're on a paid tier with higher limits.
 GROQ_CALL_PACING_SECONDS = _CONFIG["GROQ_CALL_PACING_SECONDS"]
 MAX_JOBS_SCORED_PER_RUN = _CONFIG["MAX_JOBS_SCORED_PER_RUN"]
 MAX_DESCRIPTION_CHARS = _CONFIG["MAX_DESCRIPTION_CHARS"]
 
-
+# Title keywords that mean "skip this" — internships / working-student /
+# similar non-full-employee roles. Exact word/phrase, word-boundary
+# matched, case-insensitive — deliberately no wildcard suffix, since that
+# would risk matches like "intern" inside "international". List inflected
+# forms (e.g. both "praktikant" and "praktikantin") as separate lines in
+# search_config.txt if you want them covered.
 EXCLUDE_TITLE_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_TITLES"]]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
+
+# Companies to skip entirely, regardless of how good a title/keyword
+# match their postings are. Whole word/phrase, case-insensitive, no
+# wildcard — same predictability rationale as EXCLUDE_TITLES.
+EXCLUDE_COMPANY_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_COMPANIES"]]
+_EXCLUDE_COMPANY_RE = re.compile("|".join(EXCLUDE_COMPANY_PATTERNS), re.IGNORECASE) if EXCLUDE_COMPANY_PATTERNS else None
 
 # How many recent IDs to remember, as a tie-break safety net
 RECENT_ID_CAP = 100
@@ -165,7 +215,11 @@ RESULTS_PER_PAGE = 50
 STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "combined.json"
 
-
+# Which scopes to query — read from search_config.txt's [LOCATIONS]
+# section ("Germany" = nationwide, no location filter; anything else is
+# passed to Adzuna's 'where' param as-is). Querying multiple overlapping
+# scopes (e.g. nationwide + a specific city) catches listings that a
+# broad query's per-keyword result cutoff might otherwise crowd out.
 FETCH_LOCATIONS = _CONFIG["FETCH_LOCATIONS"]
 
 
@@ -182,11 +236,22 @@ def label_for_job(job: dict) -> str:
 def should_exclude(job: dict) -> str | None:
     """Return a short reason string if the job should be skipped, else None."""
     title = job.get("title", "")
+    company = job.get("company", {}).get("display_name", "")
 
-    if _EXCLUDE_TITLE_RE.search(title):
-        return "internship/working-student role"
+    match = _EXCLUDE_TITLE_RE.search(title)
+    if match:
+        return f"excluded title keyword: '{match.group(0)}'"
 
+    if _EXCLUDE_COMPANY_RE is not None:
+        company_match = _EXCLUDE_COMPANY_RE.search(company)
+        if company_match:
+            return f"excluded company: '{company_match.group(0)}'"
 
+    # Adzuna's contract_time/contract_type fields are only populated for a
+    # minority of German listings — requiring full_time=1 silently dropped
+    # every untagged posting too. Instead, only exclude jobs EXPLICITLY
+    # tagged part-time or contract/temporary; untagged jobs (the majority)
+    # are kept rather than assumed to be excluded.
     if job.get("contract_time") == "part_time":
         return "explicitly tagged part-time"
 
