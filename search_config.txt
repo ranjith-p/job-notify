@@ -51,6 +51,16 @@ lehrstuhl
 
 
 # ---------------------------------------------------------------------------
+# EXCLUDE_COMPANIES — jobs from these companies are skipped entirely,
+# regardless of how good a title/keyword match they are. One per line,
+# whole word/phrase, case-insensitive. Matches against Adzuna's company
+# display name for the listing.
+# ---------------------------------------------------------------------------
+[EXCLUDE_COMPANIES]
+Smart Future Campus
+
+
+# ---------------------------------------------------------------------------
 # EXCLUDE_GERMAN_LEVELS — job is skipped if the LLM determines German is a
 # MANDATORY requirement at one of these levels. One per line. Common
 # values: b1, b2, c1, c2, fluent, native. Jobs where German is mentioned
