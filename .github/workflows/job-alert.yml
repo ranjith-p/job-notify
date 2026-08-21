@@ -67,29 +67,39 @@ jobs:
         run: |
           echo "--- state file on disk after script ran ---"
           cat state/combined.json
-          echo "--- git status before add ---"
-          git status
           git config user.name "job-alert-bot"
           git config user.email "actions@github.com"
-          git add state/
-          echo "--- git status after add ---"
-          git status
-          echo "--- git diff --cached ---"
-          git diff --cached
-          if git diff --cached --quiet; then
-            echo "No state changes to commit."
-            exit 0
-          fi
-          git commit -m "Update job alert state [skip ci]"
 
-          # Retry pull-rebase + push a few times in case another run's
-          # push landed in the same narrow window.
+          # Merge with whatever's currently on the remote at the JSON
+          # level (max timestamp, union of recent_ids) rather than
+          # relying on git's line-based rebase/merge — two runs can each
+          # append DIFFERENT new job IDs to the same array, which git's
+          # text merge sees as a genuine conflict (it has no idea this
+          # is just "two sets of additions"). A stuck rebase conflict
+          # previously left state updates lost entirely, since the retry
+          # loop had no way to recover from a half-applied rebase.
           for attempt in 1 2 3; do
-            if git pull --rebase origin main && git push; then
+            git fetch origin main
+            if git show origin/main:state/combined.json > /tmp/remote_state.json 2>/dev/null; then
+              python3 merge_state.py /tmp/remote_state.json state/combined.json state/combined.json
+              echo "--- merged state (attempt $attempt) ---"
+              cat state/combined.json
+            fi
+
+            git add state/
+            if git diff --cached --quiet; then
+              echo "No state changes to commit."
+              exit 0
+            fi
+            git commit -m "Update job alert state [skip ci]"
+
+            if git push origin HEAD:main; then
               echo "Push succeeded on attempt $attempt."
               exit 0
             fi
-            echo "Push attempt $attempt failed, retrying..."
+
+            echo "Push attempt $attempt failed (remote moved again) — undoing local commit and retrying merge..."
+            git reset --soft HEAD~1
             sleep $((attempt * 5))
           done
 
