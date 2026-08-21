@@ -18,7 +18,7 @@ import json
 import sys
 
 # Keep in sync with RECENT_ID_CAP in job_alert.py.
-RECENT_ID_CAP = 100
+RECENT_ID_CAP = 2000
 
 
 def merge(remote: dict, local: dict) -> dict:
