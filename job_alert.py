@@ -206,8 +206,13 @@ _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 EXCLUDE_COMPANY_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_COMPANIES"]]
 _EXCLUDE_COMPANY_RE = re.compile("|".join(EXCLUDE_COMPANY_PATTERNS), re.IGNORECASE) if EXCLUDE_COMPANY_PATTERNS else None
 
-# How many recent IDs to remember, as a tie-break safety net
-RECENT_ID_CAP = 100
+# How many recent IDs to remember, as a safety net against a source
+# "bumping" a listing's timestamp to look newer than last_seen_iso even
+# though it's the same job ID already sent. The storage cost of this is
+# trivial (just ID strings in a JSON file), so err on the side of a much
+# longer lookback window rather than a short one — a job bumped weeks
+# after it first appeared should still get caught.
+RECENT_ID_CAP = 2000
 
 # Results per page to pull each run (Adzuna max is 50)
 RESULTS_PER_PAGE = 50
