@@ -78,13 +78,32 @@ jobs:
           # is just "two sets of additions"). A stuck rebase conflict
           # previously left state updates lost entirely, since the retry
           # loop had no way to recover from a half-applied rebase.
-          for attempt in 1 2 3; do
+          #
+          # IMPORTANT: `git fetch` only updates the origin/main tracking
+          # ref — it does NOT move the local branch. A previous version
+          # of this script fetched+merged but never advanced local HEAD,
+          # so every retry rebuilt a commit on the SAME stale base and
+          # kept getting rejected as non-fast-forward even though the
+          # merge itself was working correctly. Fixed by explicitly
+          # hard-resetting the local branch to origin/main's current tip
+          # each attempt (after computing the merge, before recommitting).
+          for attempt in 1 2 3 4 5; do
             git fetch origin main
+
             if git show origin/main:state/combined.json > /tmp/remote_state.json 2>/dev/null; then
-              python3 merge_state.py /tmp/remote_state.json state/combined.json state/combined.json
-              echo "--- merged state (attempt $attempt) ---"
-              cat state/combined.json
+              python3 merge_state.py /tmp/remote_state.json state/combined.json /tmp/merged_state.json
+            else
+              cp state/combined.json /tmp/merged_state.json
             fi
+
+            # Catch local HEAD up to the actual current remote tip —
+            # this is what makes the next commit a legitimate
+            # fast-forward instead of racing a moving target.
+            git reset --hard origin/main
+            cp /tmp/merged_state.json state/combined.json
+
+            echo "--- merged state (attempt $attempt) ---"
+            cat state/combined.json
 
             git add state/
             if git diff --cached --quiet; then
@@ -98,10 +117,9 @@ jobs:
               exit 0
             fi
 
-            echo "Push attempt $attempt failed (remote moved again) — undoing local commit and retrying merge..."
-            git reset --soft HEAD~1
+            echo "Push attempt $attempt failed (remote moved again) — retrying with fresh merge..."
             sleep $((attempt * 5))
           done
 
-          echo "Push failed after 3 attempts."
+          echo "Push failed after 5 attempts."
           exit 1
