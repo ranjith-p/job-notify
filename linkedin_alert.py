@@ -7,23 +7,23 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
 import requests
 
+# ---------------------------------------------------------------------------
 # Config
+# ---------------------------------------------------------------------------
+
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-
 CANDIDATE_PROFILE = os.environ["CANDIDATE_PROFILE"]
 
-CONFIG_FILE = Path(__file__).parent / "linkedin_search_config.txt"
+CONFIG_FILE = Path(__file__).parent / "search_config.txt"
 
 SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 DETAIL_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting"
-
-
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; linkedin-alert-bot/1.0; personal use)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -40,6 +40,7 @@ _DEFAULT_EXCLUDE_TITLES = [
     "working student", "duales studium", "dual study", "software engineer",
     "data engineer",
 ]
+_DEFAULT_EXCLUDE_COMPANIES: list[str] = []
 _DEFAULT_EXCLUDE_GERMAN_LEVELS = ["c1", "c2", "fluent", "native"]
 _DEFAULT_LOCATIONS = ["Berlin, Germany", "Germany"]
 _DEFAULT_MIN_MATCH_SCORE = 4
@@ -47,6 +48,7 @@ _DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 _DEFAULT_GROQ_CALL_PACING_SECONDS = 15
 _DEFAULT_MAX_JOBS_SCORED_PER_RUN = 60
 _DEFAULT_MAX_DESCRIPTION_CHARS = 2000
+
 # Each LinkedIn results page is 10 cards. Fetching only page 1 per
 # keyword/location combo caps visibility at the top 10 results for that
 # query - if a busy query already has 10 postings occupying that page
@@ -57,6 +59,7 @@ _DEFAULT_MAX_DESCRIPTION_CHARS = 2000
 # postings keep getting missed; each extra page is one more request per
 # combo, so weigh it against request volume / IP risk (see README).
 _DEFAULT_PAGES_PER_QUERY = 2
+
 # LinkedIn's search has no reliable time-window filter available to this
 # endpoint's public search, so a job can be brand new to OUR records (never
 # seen its ID before) while genuinely being days old - e.g. a low-traffic
@@ -69,22 +72,28 @@ _DEFAULT_MAX_POSTING_AGE_DAYS = 3
 
 def load_search_config(path: Path) -> dict:
     """
-    Same plain-text format as search_config.txt (see that file / job_alert.py
-    for the full format description). No ADZUNA_COUNTRY section here - not
-    applicable to LinkedIn - and LOCATIONS are passed to LinkedIn's location
-    param as literal text (no "Germany" -> nationwide-None translation;
-    LinkedIn's endpoint just takes "Germany" directly).
+    Same plain-text format as job_alert.py's loader (see that file for the
+    full format description). Reads the SHARED sections (used by both
+    sources) plus LinkedIn's own LINKEDIN_LOCATIONS/MAX_POSTING_AGE_DAYS/
+    PAGES_PER_QUERY sections from the single merged search_config.txt.
+    Adzuna-only sections (ADZUNA_COUNTRY, ADZUNA_LOCATIONS) are parsed
+    into the recognized-sections dict (so they don't trigger a spurious
+    "unknown section" warning when reading the shared file) but simply
+    unused here.
     """
     result = {
         "KEYWORDS": [],
         "EXCLUDE_TITLES": [],
+        "EXCLUDE_COMPANIES": [],
         "EXCLUDE_GERMAN_LEVELS": [],
-        "LOCATIONS": [],
         "MIN_MATCH_SCORE": [],
         "GROQ_MODEL": [],
         "GROQ_CALL_PACING_SECONDS": [],
         "MAX_JOBS_SCORED_PER_RUN": [],
         "MAX_DESCRIPTION_CHARS": [],
+        "ADZUNA_COUNTRY": [],
+        "ADZUNA_LOCATIONS": [],
+        "LINKEDIN_LOCATIONS": [],
         "MAX_POSTING_AGE_DAYS": [],
         "PAGES_PER_QUERY": [],
     }
@@ -109,8 +118,9 @@ def load_search_config(path: Path) -> dict:
 
     keywords = result["KEYWORDS"] or _DEFAULT_KEYWORDS
     exclude_titles = result["EXCLUDE_TITLES"] or _DEFAULT_EXCLUDE_TITLES
+    exclude_companies = result["EXCLUDE_COMPANIES"] or _DEFAULT_EXCLUDE_COMPANIES
     exclude_german_levels = [w.lower() for w in result["EXCLUDE_GERMAN_LEVELS"]] or _DEFAULT_EXCLUDE_GERMAN_LEVELS
-    locations = result["LOCATIONS"] or _DEFAULT_LOCATIONS
+    locations = result["LINKEDIN_LOCATIONS"] or _DEFAULT_LOCATIONS
 
     def _single_str(key: str, default: str) -> str:
         return result[key][0].strip() if result[key] else default
@@ -135,6 +145,7 @@ def load_search_config(path: Path) -> dict:
     return {
         "KEYWORDS": keywords,
         "EXCLUDE_TITLES": exclude_titles,
+        "EXCLUDE_COMPANIES": exclude_companies,
         "EXCLUDE_GERMAN_LEVELS": exclude_german_levels,
         "LOCATIONS": locations,
         "MIN_MATCH_SCORE": min_match_score,
@@ -150,6 +161,7 @@ def load_search_config(path: Path) -> dict:
 _CONFIG = load_search_config(CONFIG_FILE)
 print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
       f"exclude_titles={_CONFIG['EXCLUDE_TITLES']}, "
+      f"exclude_companies={_CONFIG['EXCLUDE_COMPANIES']}, "
       f"exclude_german_levels={_CONFIG['EXCLUDE_GERMAN_LEVELS']}, "
       f"locations={_CONFIG['LOCATIONS']}, "
       f"min_match_score={_CONFIG['MIN_MATCH_SCORE']}, "
@@ -173,6 +185,12 @@ PAGES_PER_QUERY = _CONFIG["PAGES_PER_QUERY"]
 EXCLUDE_TITLE_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_TITLES"]]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
+# Companies to skip entirely — same shared EXCLUDE_COMPANIES section
+# Adzuna's job_alert.py uses, now also honored here for consistency
+# between the two sources.
+EXCLUDE_COMPANY_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_COMPANIES"]]
+_EXCLUDE_COMPANY_RE = re.compile("|".join(EXCLUDE_COMPANY_PATTERNS), re.IGNORECASE) if EXCLUDE_COMPANY_PATTERNS else None
+
 # How many recent IDs to remember. This used to be 100, sized for when only
 # page 1 (~10 results/combo) was fetched. Since PAGES_PER_QUERY=2 roughly
 # doubled unique job churn per run, 100 was getting fully cycled out within
@@ -187,9 +205,16 @@ STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "linkedin.json"
 
 
-def should_exclude(title: str) -> str | None:
-    if _EXCLUDE_TITLE_RE.search(title):
-        return "internship/working-student role"
+def should_exclude(title: str, company: str | None = None) -> str | None:
+    match = _EXCLUDE_TITLE_RE.search(title)
+    if match:
+        return f"excluded title keyword: '{match.group(0)}'"
+
+    if _EXCLUDE_COMPANY_RE is not None and company:
+        company_match = _EXCLUDE_COMPANY_RE.search(company)
+        if company_match:
+            return f"excluded company: '{company_match.group(0)}'"
+
     return None
 
 
@@ -252,6 +277,7 @@ def http_get_with_retry(url: str, max_retries: int = 3) -> requests.Response | N
             time.sleep(delay)
             delay = min(delay * 2, 8.0)
             continue
+
         if resp.status_code == 404:
             return None
         if resp.status_code == 429 or resp.status_code >= 500:
@@ -357,6 +383,7 @@ def fetch_jobs() -> list[dict]:
     that query, no point requesting further pages)."""
     seen_ids = set()
     merged: list[dict] = []
+
     for location in LOCATIONS:
         for keyword in KEYWORDS:
             combo_dates = []
@@ -373,12 +400,14 @@ def fetch_jobs() -> list[dict]:
                         seen_ids.add(card["id"])
                         merged.append(card)
                 time.sleep(1.5)  # be polite - see the ToS note at the top of this file
+
             # Diagnostic: if sortBy=DD is actually honored, dates within a
             # combo should be non-increasing (each page older than the last).
             # If this print ever shows dates out of order, that's evidence
             # the endpoint isn't sorting by date the way we're assuming.
             print(f"DEBUG '{keyword}' @ '{location}': dates across "
                   f"{len(combo_dates)} card(s) = {combo_dates}")
+
     return merged
 
 
@@ -608,6 +637,7 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
                   f"suggested wait {retry_after:.0f}s exceeds {max_retry_wait_seconds}s "
                   f"— giving up on just this job's score", file=sys.stderr)
             break
+
         print(f"Groq rate-limited (attempt {attempt}/{max_attempts}), "
               f"waiting {retry_after}s", file=sys.stderr)
         time.sleep(retry_after)
@@ -719,6 +749,7 @@ def send_telegram(job: dict, match: dict) -> None:
 def run() -> None:
     state = load_state(STATE_FILE)
     print(f"DEBUG loaded state from {STATE_FILE}: {state}")
+
     # Ordered dict, not a set: Python randomizes a set's iteration order
     # between process runs (hash randomization), which broke the
     # RECENT_ID_CAP trim below (list(a_set)[-100:] was dropping an
@@ -750,8 +781,8 @@ def run() -> None:
                 json={
                     "chat_id": TELEGRAM_CHAT_ID,
                     "text": f"✅ LinkedIn job alert initialized.\nTracking {len(jobs)} existing "
-                    f"posting(s) as baseline. You'll get a message here whenever a new "
-                    f"matching posting appears.",
+                            f"posting(s) as baseline. You'll get a message here whenever a new "
+                            f"matching posting appears.",
                 },
                 timeout=15,
             ).raise_for_status()
@@ -783,7 +814,7 @@ def run() -> None:
                   f"{MAX_POSTING_AGE_DAYS} days): {job['title']}")
             continue
 
-        exclude_reason = should_exclude(job["title"])
+        exclude_reason = should_exclude(job["title"], job.get("company"))
         if exclude_reason:
             print(f"Skipped ({exclude_reason}): {job['title']}")
             continue
@@ -847,6 +878,7 @@ def run() -> None:
     # comment where recent_ids is built, above).
     all_recent = list(recent_ids.keys())
     trimmed = all_recent[-RECENT_ID_CAP:] if len(all_recent) > RECENT_ID_CAP else all_recent
+
     new_state = {
         "last_seen_iso": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "recent_ids": trimmed,
