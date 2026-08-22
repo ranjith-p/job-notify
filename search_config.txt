@@ -1,18 +1,30 @@
 # =============================================================================
-# Job alert search configuration
+# Job alert search configuration — SHARED by both the Adzuna and LinkedIn
+# sources.
 #
-# Edit this file to customize what the bot searches for and filters out —
-# no Python knowledge needed. Lines starting with # are comments and are
+# Edit this file to customize what the bot searches for and filters out.
+# No Python knowledge needed. Lines starting with # are comments and are
 # ignored. Blank lines are ignored too. Each setting lives under its own
 # [SECTION] header; add or remove lines under a section to change it.
 #
-# After editing, commit and push this file — the next run picks it up
-# automatically.
+# Layout: SHARED settings first (used by both job_alert.py and
+# linkedin_alert.py), then ADZUNA-ONLY and LINKEDIN-ONLY sections at the
+# bottom for the handful of settings that genuinely can't be shared (each
+# source's location field expects a different string format, and each has
+# a couple of settings the other doesn't need).
+#
+# After editing, commit and push this file — the next run of EITHER source
+# picks up its relevant sections automatically.
+# =============================================================================
+
+
+# =============================================================================
+# SHARED SECTIONS
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # KEYWORDS — job title/description phrases to search for (one per line).
-# Each is queried as an exact phrase against Adzuna; results are merged.
+# Used by both sources.
 # ---------------------------------------------------------------------------
 [KEYWORDS]
 data scientist
@@ -27,9 +39,9 @@ data analyst
 # ---------------------------------------------------------------------------
 # EXCLUDE_TITLES — if a job's title contains any of these (as a whole
 # word/phrase, case-insensitive), it's skipped entirely. One per line.
-# Matching is exact (no wildcard) so it stays predictable — list inflected
-# forms separately if needed (e.g. both "praktikant" and "praktikantin"
-# are included below).
+# Used by both sources. Matching is exact (no wildcard) so it stays
+# predictable — list inflected forms separately if needed (e.g. both
+# "praktikant" and "praktikantin" are included below).
 # ---------------------------------------------------------------------------
 [EXCLUDE_TITLES]
 praktikum
@@ -53,8 +65,7 @@ lehrstuhl
 # ---------------------------------------------------------------------------
 # EXCLUDE_COMPANIES — jobs from these companies are skipped entirely,
 # regardless of how good a title/keyword match they are. One per line,
-# whole word/phrase, case-insensitive. Matches against Adzuna's company
-# display name for the listing.
+# whole word/phrase, case-insensitive. Used by both sources.
 # ---------------------------------------------------------------------------
 [EXCLUDE_COMPANIES]
 Smart Future Campus
@@ -65,6 +76,7 @@ Smart Future Campus
 # MANDATORY requirement at one of these levels. One per line. Common
 # values: b1, b2, c1, c2, fluent, native. Jobs where German is mentioned
 # as optional/nice-to-have are never excluded, regardless of this list.
+# Used by both sources.
 # ---------------------------------------------------------------------------
 [EXCLUDE_GERMAN_LEVELS]
 c1
@@ -74,24 +86,59 @@ native
 
 
 # ---------------------------------------------------------------------------
-# LOCATIONS — where to search. Use "Germany" (exactly, capital G) for a
-# nationwide search with no location filter. Add more lines for specific
-# cities to also search (helps catch listings that fall outside the
-# nationwide query's per-keyword result cutoff). One per line.
-# ---------------------------------------------------------------------------
-[LOCATIONS]
-Germany
-Berlin
-
-
-# ---------------------------------------------------------------------------
 # MIN_MATCH_SCORE — jobs scored below this (out of 10) by the LLM are
 # skipped. Single number, 1-10. Jobs where scoring itself failed are
-# still sent regardless of this setting.
+# still sent regardless of this setting. Used by both sources.
 # ---------------------------------------------------------------------------
 [MIN_MATCH_SCORE]
 4
 
+
+# ---------------------------------------------------------------------------
+# GROQ_MODEL — which Groq-hosted model scores each job's match and
+# extracts the German requirement / years of experience. Default is
+# fast/cheap with high rate-limit headroom on Groq's free tier. Used by
+# both sources — IMPORTANT: both scripts share the SAME Groq API key and
+# therefore the SAME daily request quota (1,000/day at time of writing).
+# Changing this affects the budget available to whichever source runs
+# second in a given day.
+# ---------------------------------------------------------------------------
+[GROQ_MODEL]
+openai/gpt-oss-20b
+
+
+# ---------------------------------------------------------------------------
+# GROQ_CALL_PACING_SECONDS — seconds to wait between scoring calls, to
+# stay within Groq's free-tier ~6,000-8,000 tokens/minute limit. Used by
+# both sources. Remember the daily quota is SHARED between both scripts —
+# loosening this for one source leaves less headroom for the other on a
+# busy day.
+# ---------------------------------------------------------------------------
+[GROQ_CALL_PACING_SECONDS]
+20
+
+
+# ---------------------------------------------------------------------------
+# MAX_JOBS_SCORED_PER_RUN — safety cap on how many jobs get scored in a
+# single run, protecting Groq's free-tier 1,000-requests/DAY limit
+# (SHARED between both sources) from being exhausted by one large
+# backlog. Used by both sources.
+# ---------------------------------------------------------------------------
+[MAX_JOBS_SCORED_PER_RUN]
+60
+
+
+# ---------------------------------------------------------------------------
+# MAX_DESCRIPTION_CHARS — how much job-description text gets sent to Groq
+# per scoring call, to bound token cost. Used by both sources.
+# ---------------------------------------------------------------------------
+[MAX_DESCRIPTION_CHARS]
+1500
+
+
+# =============================================================================
+# ADZUNA-ONLY SECTIONS (job_alert.py)
+# =============================================================================
 
 # ---------------------------------------------------------------------------
 # ADZUNA_COUNTRY — Adzuna's country code to search. "de" = Germany. See
@@ -103,42 +150,49 @@ de
 
 
 # ---------------------------------------------------------------------------
-# GROQ_MODEL — which Groq-hosted model scores each job's match and
-# extracts the German requirement / years of experience. Default is
-# fast/cheap with high rate-limit headroom on Groq's free tier. If you're
-# on a paid Groq tier, a larger model (e.g. "openai/gpt-oss-120b") may
-# give more accurate scoring at the cost of tighter rate limits.
+# ADZUNA_LOCATIONS — where to search via Adzuna. Use "Germany" (exactly,
+# capital G) for a nationwide search with no location filter. Add more
+# lines for specific cities to also search (helps catch listings that
+# fall outside the nationwide query's per-keyword result cutoff). One per
+# line. NOTE: format differs from LINKEDIN_LOCATIONS below — Adzuna wants
+# a bare city name ("Berlin"), not "Berlin, Germany".
 # ---------------------------------------------------------------------------
-[GROQ_MODEL]
-openai/gpt-oss-20b
+[ADZUNA_LOCATIONS]
+Germany
+Berlin
+
+
+# =============================================================================
+# LINKEDIN-ONLY SECTIONS (linkedin_alert.py)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# LINKEDIN_LOCATIONS — where to search via LinkedIn's public search. One
+# per line. NOTE: format differs from ADZUNA_LOCATIONS above — LinkedIn's
+# location field expects "City, Country" format, not a bare city name.
+# ---------------------------------------------------------------------------
+[LINKEDIN_LOCATIONS]
+Berlin, Germany
+Germany
 
 
 # ---------------------------------------------------------------------------
-# GROQ_CALL_PACING_SECONDS — seconds to wait between scoring calls, to
-# stay within Groq's free-tier ~6,000-8,000 tokens/minute limit. Lower
-# this if you're on a paid tier with a higher limit; raise it if you're
-# still seeing rate-limit warnings in the logs.
+# MAX_POSTING_AGE_DAYS — a job is skipped if its posting date is older
+# than this many days. LinkedIn's public search has no reliable
+# time-window filter, so this catches postings that are "new to us" (an
+# ID we haven't seen) but not actually recent (e.g. a low-traffic
+# keyword/location combo where nothing newer has pushed it off page 1
+# yet).
 # ---------------------------------------------------------------------------
-[GROQ_CALL_PACING_SECONDS]
-20
+[MAX_POSTING_AGE_DAYS]
+3
 
 
 # ---------------------------------------------------------------------------
-# MAX_JOBS_SCORED_PER_RUN — safety cap on how many jobs get scored in a
-# single run, protecting Groq's free-tier 1,000-requests/DAY limit from
-# being exhausted by one large backlog. Jobs beyond this cap still get
-# sent, just without a score. Raise this if you're on a paid tier.
+# PAGES_PER_QUERY — how many pages of LinkedIn results to fetch per
+# keyword/location combo (10 results per page). Higher catches more
+# postings per run but increases request volume — see the ToS note near
+# the top of linkedin_alert.py before raising this.
 # ---------------------------------------------------------------------------
-[MAX_JOBS_SCORED_PER_RUN]
-60
-
-
-# ---------------------------------------------------------------------------
-# MAX_DESCRIPTION_CHARS — how much job-description text gets sent to Groq
-# per scoring call, to bound token cost. Kept well above Adzuna's ~600
-# char snippet size (for accuracy on requirements buried later in a
-# posting) but capped to stay within the free-tier token/minute budget.
-# Raise this if you're on a paid tier and want richer context per call.
-# ---------------------------------------------------------------------------
-[MAX_DESCRIPTION_CHARS]
-1500
+[PAGES_PER_QUERY]
+2
