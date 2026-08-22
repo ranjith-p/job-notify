@@ -83,13 +83,20 @@ def load_search_config(path: Path) -> dict:
         "EXCLUDE_TITLES": [],
         "EXCLUDE_COMPANIES": [],
         "EXCLUDE_GERMAN_LEVELS": [],
-        "LOCATIONS": [],
+        "ADZUNA_LOCATIONS": [],
         "MIN_MATCH_SCORE": [],
         "ADZUNA_COUNTRY": [],
         "GROQ_MODEL": [],
         "GROQ_CALL_PACING_SECONDS": [],
         "MAX_JOBS_SCORED_PER_RUN": [],
         "MAX_DESCRIPTION_CHARS": [],
+        # LinkedIn-only sections — recognized here too (this file reads the
+        # same shared search_config.txt as linkedin_alert.py) purely so
+        # parsing doesn't print a spurious "unknown section" warning; not
+        # used by this script.
+        "LINKEDIN_LOCATIONS": [],
+        "MAX_POSTING_AGE_DAYS": [],
+        "PAGES_PER_QUERY": [],
     }
 
     if not path.exists():
@@ -114,7 +121,7 @@ def load_search_config(path: Path) -> dict:
     exclude_titles = result["EXCLUDE_TITLES"] or _DEFAULT_EXCLUDE_TITLES
     exclude_companies = result["EXCLUDE_COMPANIES"] or _DEFAULT_EXCLUDE_COMPANIES
     exclude_german_levels = [w.lower() for w in result["EXCLUDE_GERMAN_LEVELS"]] or _DEFAULT_EXCLUDE_GERMAN_LEVELS
-    locations = result["LOCATIONS"] or _DEFAULT_LOCATIONS
+    locations = result["ADZUNA_LOCATIONS"] or _DEFAULT_LOCATIONS
 
     def _single_str(key: str, default: str) -> str:
         return result[key][0].strip() if result[key] else default
