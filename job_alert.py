@@ -1,18 +1,3 @@
-"""
-Data science job alert bot.
-
-Fetches Germany-wide AND Berlin-scoped Adzuna results (the Berlin-specific
-query catches listings that fall outside the top-50-per-keyword cutoff on
-the broader Germany-wide query), merges them into a single deduped list,
-and runs ONE unified new/seen cursor across everything. Each job is
-scored and sent exactly once, labeled 🇩🇪 Germany or 📍 Berlin based on
-its actual location — this avoids the double-scoring/double-sending that
-happened when Germany and Berlin were tracked as two independent searches
-with separate state.
-
-State is stored in state/combined.json so it persists between runs (the
-GitHub Actions workflow commits this back to the repo).
-"""
 
 import html
 import json
@@ -38,18 +23,11 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# Loaded from a GitHub Secret rather than hardcoded, so your career/resume
-# details aren't exposed if this repo is public. See README for setup —
-# the raw text (same content as before) goes into a CANDIDATE_PROFILE
-# secret, not into this file.
+
 CANDIDATE_PROFILE = os.environ["CANDIDATE_PROFILE"]
 
 CONFIG_FILE = Path(__file__).parent / "search_config.txt"
 
-# Fallback defaults, used only if search_config.txt is missing or a
-# section within it is empty/missing — normal operation reads everything
-# from that file so users can customize search behavior without touching
-# this script at all.
 _DEFAULT_KEYWORDS = [
     "data scientist", "data science", "machine learning engineer",
     "ML engineer", "applied scientist", "research scientist", "data analyst",
