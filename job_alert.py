@@ -68,10 +68,7 @@ def load_search_config(path: Path) -> dict:
         "GROQ_CALL_PACING_SECONDS": [],
         "MAX_JOBS_SCORED_PER_RUN": [],
         "MAX_DESCRIPTION_CHARS": [],
-        # LinkedIn-only sections — recognized here too (this file reads the
-        # same shared search_config.txt as linkedin_alert.py) purely so
-        # parsing doesn't print a spurious "unknown section" warning; not
-        # used by this script.
+
         "LINKEDIN_LOCATIONS": [],
         "MAX_POSTING_AGE_DAYS": [],
         "PAGES_PER_QUERY": [],
@@ -155,48 +152,24 @@ print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
 ADZUNA_COUNTRY = _CONFIG["ADZUNA_COUNTRY"]
 KEYWORDS = _CONFIG["KEYWORDS"]
 
-# Jobs scored below this are skipped. Jobs where scoring itself failed
-# (match_score is None) are still sent — a scoring failure shouldn't
-# compound into also hiding the job.
+
 MIN_MATCH_SCORE = _CONFIG["MIN_MATCH_SCORE"]
 
-# llama-3.1-8b-instant and llama-3.3-70b-versatile were deprecated by Groq
-# on 2026-06-17. gpt-oss-20b (the default) is fast with high rate-limit
-# headroom on the free tier — the larger -120b has much tighter limits,
-# which combined with long descriptions caused 10+ minute rate-limit
-# waits per job in testing. Change via [GROQ_MODEL] in search_config.txt
-# if you're on a paid tier or want to experiment.
 GROQ_MODEL = _CONFIG["GROQ_MODEL"]
 
-# Groq's free tier for gpt-oss-20b: 30 requests/min, ~6,000-8,000
-# tokens/min, 1,000 requests/DAY (confirmed via Groq's published limits).
-# These three are tuned to stay within that on the free tier — loosen
-# them via search_config.txt if you're on a paid tier with higher limits.
+
 GROQ_CALL_PACING_SECONDS = _CONFIG["GROQ_CALL_PACING_SECONDS"]
 MAX_JOBS_SCORED_PER_RUN = _CONFIG["MAX_JOBS_SCORED_PER_RUN"]
 MAX_DESCRIPTION_CHARS = _CONFIG["MAX_DESCRIPTION_CHARS"]
 
-# Title keywords that mean "skip this" — internships / working-student /
-# similar non-full-employee roles. Exact word/phrase, word-boundary
-# matched, case-insensitive — deliberately no wildcard suffix, since that
-# would risk matches like "intern" inside "international". List inflected
-# forms (e.g. both "praktikant" and "praktikantin") as separate lines in
-# search_config.txt if you want them covered.
 EXCLUDE_TITLE_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_TITLES"]]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
-# Companies to skip entirely, regardless of how good a title/keyword
-# match their postings are. Whole word/phrase, case-insensitive, no
-# wildcard — same predictability rationale as EXCLUDE_TITLES.
+
 EXCLUDE_COMPANY_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_COMPANIES"]]
 _EXCLUDE_COMPANY_RE = re.compile("|".join(EXCLUDE_COMPANY_PATTERNS), re.IGNORECASE) if EXCLUDE_COMPANY_PATTERNS else None
 
-# How many recent IDs to remember, as a safety net against a source
-# "bumping" a listing's timestamp to look newer than last_seen_iso even
-# though it's the same job ID already sent. The storage cost of this is
-# trivial (just ID strings in a JSON file), so err on the side of a much
-# longer lookback window rather than a short one — a job bumped weeks
-# after it first appeared should still get caught.
+
 RECENT_ID_CAP = 2000
 
 # Results per page to pull each run (Adzuna max is 50)
@@ -205,11 +178,7 @@ RESULTS_PER_PAGE = 50
 STATE_DIR = Path(__file__).parent / "state"
 STATE_FILE = STATE_DIR / "combined.json"
 
-# Which scopes to query — read from search_config.txt's [LOCATIONS]
-# section ("Germany" = nationwide, no location filter; anything else is
-# passed to Adzuna's 'where' param as-is). Querying multiple overlapping
-# scopes (e.g. nationwide + a specific city) catches listings that a
-# broad query's per-keyword result cutoff might otherwise crowd out.
+
 FETCH_LOCATIONS = _CONFIG["FETCH_LOCATIONS"]
 
 
@@ -480,10 +449,6 @@ def enrich_description(job: dict) -> dict:
         )
         resp.raise_for_status()
 
-        # Strategy 1: JSON-LD structured data (schema.org JobPosting).
-        # This exists server-side for SEO on most job boards even when
-        # the visible page requires JavaScript to render (e.g. StepStone),
-        # so it's the most reliable source when present.
         jsonld_desc = extract_jsonld_job_description(resp.text)
         if jsonld_desc and len(jsonld_desc) > len(description):
             full_text_for_scan = jsonld_desc
@@ -497,10 +462,7 @@ def enrich_description(job: dict) -> dict:
             text = _clean_html_fragment(resp.text)
             full_text_for_scan = text if len(text) > len(description) else description
 
-            # Anchor on a distinctive slice of the known snippet (skip the
-            # very start, which is often generic like "About the role" —
-            # a slice from partway in is more likely to be unique on the
-            # page).
+
             anchor = description[50:150].strip() if len(description) > 150 else description.strip()
             idx = text.find(anchor) if anchor else -1
 
@@ -581,9 +543,7 @@ def send_telegram(label: str, job: dict, match: dict) -> None:
     if exp and exp.lower() != "not mentioned":
         exp_line = f"\n\n📅 Experience: {html.escape(exp)}"
 
-    # HTML parse mode + explicit escaping is far more robust than Telegram's
-    # legacy Markdown, which breaks (400 error) on unescaped *, _, [, ], (, )
-    # etc. — all common in job titles like "(all genders)" or "AI/ML".
+
     text = (
         f"{html.escape(label)} — New role\n\n"
         f"<b>{html.escape(title)}</b>\n"
@@ -626,10 +586,7 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
     """
     title = job.get("title", "")
 
-    # If our local scan of the FULL page found zero mentions of
-    # "German"/"Deutsch" anywhere, we can say "Not mentioned" with
-    # certainty and skip asking the model about it at all — no ambiguity
-    # possible when the word genuinely doesn't appear.
+
     german_section = (
         f"Excerpts from the posting that mention German:\n{german_context}"
         if german_context
@@ -685,13 +642,7 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
         "response_format": {"type": "json_object"},
     }
 
-    # Retry on rate limits (429) with backoff — but cap how long we'll
-    # actually wait. Groq's Retry-After header can suggest waits of many
-    # minutes when the token quota (not just request rate) is exhausted —
-    # honoring that blindly would tie up the whole run for far too long
-    # and burn Actions minutes for nothing. If the suggested wait exceeds
-    # the cap, give up immediately; the caller already falls back to
-    # sending the job without a score rather than crashing.
+
     max_attempts = 3
     max_retry_wait_seconds = 15
     resp = None
@@ -717,8 +668,6 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
     resp.raise_for_status()
     raw = resp.json()["choices"][0]["message"]["content"]
 
-    # Defensive parsing: strip accidental code fences even though we
-    # requested json_object mode, in case the model wraps it anyway.
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`")
@@ -762,22 +711,10 @@ def run() -> None:
     state = load_state(STATE_FILE)
     print(f"DEBUG loaded state from {STATE_FILE}: {state}")
     last_seen = parse_iso(state["last_seen_iso"])
-    # Ordered list (oldest -> newest) for reliable FIFO retention across
-    # runs, plus a set mirror for fast membership checks. The previous
-    # approach filtered recent_ids down to only IDs that ALSO appeared in
-    # the current run's Adzuna fetch before trimming — which silently
-    # dropped legitimately-recent IDs the moment they aged out of
-    # Adzuna's top-N-per-keyword window (often within a single run),
-    # making the safety net nearly useless. This caused exact-duplicate
-    # resends when a source bumped/refreshed a listing's timestamp
-    # without changing its ID/URL: the time-based check alone couldn't
-    # catch it, and the leaky ID-based backup had already forgotten the ID.
+
     recent_ids_list = list(state["recent_ids"])
     recent_ids_set = set(recent_ids_list)
 
-    # Fetch both scopes and merge into one deduped list, keyed by job id —
-    # this is what makes a Berlin job (which matches both queries) get
-    # processed exactly once instead of twice.
     all_jobs: dict[str, dict] = {}
     for location in FETCH_LOCATIONS:
         for job in fetch_jobs(location):
@@ -803,12 +740,7 @@ def run() -> None:
         if is_new_by_time and is_new_by_id:
             recent_ids_set.add(job_id)
             recent_ids_list.append(job_id)
-            # Clamp to "now" — job boards occasionally report bogus future
-            # 'created' timestamps (reposts/bumps, clock mismatches on the
-            # source's end). If we let that poison the cursor, a genuinely
-            # new job posted between now and that fake future point would
-            # look "older than the cursor" next run and be silently
-            # skipped forever. Capping at now prevents that.
+
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if created > newest_iso and created <= now_iso:
                 newest_iso = created
@@ -824,18 +756,13 @@ def run() -> None:
 
             new_jobs.append(job)
 
-    # Pass 1: enrich, score, and filter — build the final list of jobs
-    # that will actually be sent, so the batch header count is accurate
-    # (rather than counting jobs that get filtered out by the German
-    # requirement check below).
+
     to_send = []
     for i, job in enumerate(new_jobs):
         label = label_for_job(job)
 
         if i >= MAX_JOBS_SCORED_PER_RUN:
-            # Beyond the per-run cap — still send, just without a score,
-            # rather than risk exhausting Groq's daily request quota in
-            # one run (which can't be recovered from until the next day).
+
             print(f"Skipping score for '{job.get('title')}' — per-run "
                   f"scoring cap ({MAX_JOBS_SCORED_PER_RUN}) reached")
             match = {"match_score": None, "match_reason": "",
@@ -889,19 +816,11 @@ def run() -> None:
             print(f"Sent alert ({label}): {job.get('title')} "
                   f"(match={match.get('match_score')})")
         except Exception as exc:  # noqa: BLE001
-            # Critical: never let one bad message crash the whole run —
-            # that would skip save_state() below and reset the cursor to
-            # square one, causing every job to be resent next run. Log and
-            # move on; the cursor still advances since recent_ids/newest_iso
-            # were already updated in the filtering loop above.
+
             print(f"ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
-    # Trim to the cap, keeping the most recently added (FIFO eviction of
-    # the oldest) — independent of whether an ID happens to appear in
-    # this run's Adzuna fetch, so a legitimately-recent ID can't be
-    # silently forgotten just because it aged out of one run's results.
     trimmed = recent_ids_list[-RECENT_ID_CAP:]
 
     new_state = {
