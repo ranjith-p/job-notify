@@ -60,6 +60,11 @@ data engineer
 professur
 juniorprofessur
 lehrstuhl
+masterarbeit
+bachelorarbeit
+abschlussarbeit
+master thesis
+bachelor thesis
 
 
 # ---------------------------------------------------------------------------
