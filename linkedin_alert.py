@@ -387,6 +387,8 @@ def fetch_jobs() -> list[dict]:
     for location in LOCATIONS:
         for keyword in KEYWORDS:
             combo_dates = []
+            combo_locations = []
+            combo_new_count = 0
             for page in range(PAGES_PER_QUERY):
                 resp = http_get_with_retry(build_search_url(keyword, location, start=page * 10))
                 if resp is None:
@@ -396,9 +398,11 @@ def fetch_jobs() -> list[dict]:
                     break  # no more results for this combo
                 for card in cards:
                     combo_dates.append(card.get("date"))
+                    combo_locations.append(card.get("location"))
                     if card["id"] not in seen_ids:
                         seen_ids.add(card["id"])
                         merged.append(card)
+                        combo_new_count += 1
                 time.sleep(1.5)  # be polite - see the ToS note at the top of this file
 
             # Diagnostic: if sortBy=DD is actually honored, dates within a
@@ -407,6 +411,15 @@ def fetch_jobs() -> list[dict]:
             # the endpoint isn't sorting by date the way we're assuming.
             print(f"DEBUG '{keyword}' @ '{location}': dates across "
                   f"{len(combo_dates)} card(s) = {combo_dates}")
+            # Diagnostic: shows the actual city breakdown per combo, and
+            # how many of this combo's cards weren't already found by an
+            # earlier combo in the loop (e.g. Berlin's own search) - this
+            # tells us directly whether the 'Germany' search's UNIQUE
+            # contribution (beyond what Berlin already covers) includes
+            # non-Berlin cities, or is itself still mostly Berlin-tagged.
+            print(f"DEBUG '{keyword}' @ '{location}': {combo_new_count} "
+                  f"new (not already found) of {len(combo_locations)}, "
+                  f"locations = {combo_locations}")
 
     return merged
 
