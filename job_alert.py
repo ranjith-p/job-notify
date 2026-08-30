@@ -11,10 +11,6 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
 ADZUNA_APP_ID = os.environ["ADZUNA_APP_ID"]
 ADZUNA_APP_KEY = os.environ["ADZUNA_APP_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -206,11 +202,7 @@ def should_exclude(job: dict) -> str | None:
         if company_match:
             return f"excluded company: '{company_match.group(0)}'"
 
-    # Adzuna's contract_time/contract_type fields are only populated for a
-    # minority of German listings — requiring full_time=1 silently dropped
-    # every untagged posting too. Instead, only exclude jobs EXPLICITLY
-    # tagged part-time or contract/temporary; untagged jobs (the majority)
-    # are kept rather than assumed to be excluded.
+
     if job.get("contract_time") == "part_time":
         return "explicitly tagged part-time"
 
