@@ -1,18 +1,4 @@
-"""
-Merge two versions of state/combined.json (the remote's current version
-vs. this run's freshly-computed local version) at the JSON level,
-instead of relying on git's line-based text merge/rebase.
 
-Why: multiple runs can each append DIFFERENT new job IDs to the same
-recent_ids array. Git's text-based merge/rebase has no idea these are
-semantically just "two sets of additions" — it sees conflicting line
-changes and gives up, leaving the working tree in a stuck mid-rebase
-state that a simple retry loop can't recover from. Since the correct
-merge here is obvious (take the newer timestamp, union the ID lists),
-we do that ourselves rather than asking git to guess.
-
-Usage: python3 merge_state.py <remote_file> <local_file> <output_file>
-"""
 
 import json
 import sys
