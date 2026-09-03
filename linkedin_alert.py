@@ -49,24 +49,8 @@ _DEFAULT_GROQ_CALL_PACING_SECONDS = 15
 _DEFAULT_MAX_JOBS_SCORED_PER_RUN = 60
 _DEFAULT_MAX_DESCRIPTION_CHARS = 2000
 
-# Each LinkedIn results page is 10 cards. Fetching only page 1 per
-# keyword/location combo caps visibility at the top 10 results for that
-# query - if a busy query already has 10 postings occupying that page
-# (whether by recency or LinkedIn's own relevance ranking; sortBy=DD is
-# requested but not independently verified as honored by this endpoint),
-# a genuinely new posting ranked 11th+ is invisible to this bot no matter
-# how recent it is. Raise this to look further down the results if new
-# postings keep getting missed; each extra page is one more request per
-# combo, so weigh it against request volume / IP risk (see README).
 _DEFAULT_PAGES_PER_QUERY = 2
 
-# LinkedIn's search has no reliable time-window filter available to this
-# endpoint's public search, so a job can be brand new to OUR records (never
-# seen its ID before) while genuinely being days old - e.g. a low-traffic
-# keyword/location combo where nothing newer has pushed it off page 1 yet.
-# This age gate catches that: "new to us" and "recently posted" are checked
-# separately, and a job failing this one is still recorded as seen (so it's
-# not re-evaluated every run) but never sent.
 _DEFAULT_MAX_POSTING_AGE_DAYS = 3
 
 
@@ -297,12 +281,7 @@ def build_search_url(query: str, location: str, start: int = 0) -> str:
         "keywords": query,
         "location": location,
         "start": str(start),
-        # Most-recent-first (LinkedIn's default is relevance-ranked). With
-        # a limited number of pages fetched per combo and no time filter,
-        # this matters: a stale-but-relevant posting could otherwise sit
-        # above a genuinely new one. (Not independently verified as
-        # actually honored server-side - the date logging in fetch_jobs
-        # below is there to check this if new postings keep being missed.)
+
         "sortBy": "DD",
     }
     return f"{SEARCH_URL}?{requests.compat.urlencode(params)}"
@@ -405,18 +384,9 @@ def fetch_jobs() -> list[dict]:
                         combo_new_count += 1
                 time.sleep(1.5)  # be polite - see the ToS note at the top of this file
 
-            # Diagnostic: if sortBy=DD is actually honored, dates within a
-            # combo should be non-increasing (each page older than the last).
-            # If this print ever shows dates out of order, that's evidence
-            # the endpoint isn't sorting by date the way we're assuming.
             print(f"DEBUG '{keyword}' @ '{location}': dates across "
                   f"{len(combo_dates)} card(s) = {combo_dates}")
-            # Diagnostic: shows the actual city breakdown per combo, and
-            # how many of this combo's cards weren't already found by an
-            # earlier combo in the loop (e.g. Berlin's own search) - this
-            # tells us directly whether the 'Germany' search's UNIQUE
-            # contribution (beyond what Berlin already covers) includes
-            # non-Berlin cities, or is itself still mostly Berlin-tagged.
+
             print(f"DEBUG '{keyword}' @ '{location}': {combo_new_count} "
                   f"new (not already found) of {len(combo_locations)}, "
                   f"locations = {combo_locations}")
@@ -809,13 +779,7 @@ def run() -> None:
     to_send = []
     for i, job in enumerate(new_jobs):
         if i >= MAX_JOBS_SCORED_PER_RUN:
-            # Deliberately do NOT mark this job as seen and do NOT send it
-            # unscored - previously this cap sent a bare, score-less message
-            # AND permanently marked the job seen (so it could never be
-            # properly evaluated even in a later run). Leaving it out of
-            # recent_ids means it's still "new" next run and gets a real
-            # score then, instead of being sent with no fit assessment or
-            # silently lost.
+
             print(f"Deferring '{job['title']}' to a future run — per-run "
                   f"scoring cap ({MAX_JOBS_SCORED_PER_RUN}) reached")
             continue
@@ -842,13 +806,7 @@ def run() -> None:
         try:
             match = score_job_match(job, description, german_context)
         except GroqQuotaExhausted as exc:
-            # Every remaining job this run would fail the same way (see the
-            # class docstring) - stop calling Groq for the rest of this run.
-            # Unlike the per-run cap above, this job and everything after it
-            # in new_jobs is simply left out of recent_ids entirely (not
-            # sent, not marked seen), so all of it is properly re-evaluated
-            # - with a real score - on the next run instead of being lost
-            # or sent blank.
+
             recent_ids.pop(job["id"], None)
             remaining = len(new_jobs) - i
             print(f"WARNING Groq quota exhausted ({exc}) — stopping scoring "
