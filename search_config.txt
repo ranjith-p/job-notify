@@ -65,6 +65,14 @@ bachelorarbeit
 abschlussarbeit
 master thesis
 bachelor thesis
+dualer student
+duale studentin
+dhbw
+wissenschaftler
+wissenschaftlerin
+wissenschaftliche mitarbeiterin
+wissenschaftlicher mitarbeiter
+wissenschaftliche mitarbeiter
 
 
 # ---------------------------------------------------------------------------
@@ -200,4 +208,4 @@ Germany
 # the top of linkedin_alert.py before raising this.
 # ---------------------------------------------------------------------------
 [PAGES_PER_QUERY]
-2
+5
