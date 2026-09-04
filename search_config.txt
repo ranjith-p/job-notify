@@ -73,6 +73,7 @@ wissenschaftlerin
 wissenschaftliche mitarbeiterin
 wissenschaftlicher mitarbeiter
 wissenschaftliche mitarbeiter
+bachelor
 
 
 # ---------------------------------------------------------------------------
