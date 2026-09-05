@@ -169,20 +169,11 @@ PAGES_PER_QUERY = _CONFIG["PAGES_PER_QUERY"]
 EXCLUDE_TITLE_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_TITLES"]]
 _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
-# Companies to skip entirely — same shared EXCLUDE_COMPANIES section
-# Adzuna's job_alert.py uses, now also honored here for consistency
-# between the two sources.
+
 EXCLUDE_COMPANY_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_COMPANIES"]]
 _EXCLUDE_COMPANY_RE = re.compile("|".join(EXCLUDE_COMPANY_PATTERNS), re.IGNORECASE) if EXCLUDE_COMPANY_PATTERNS else None
 
-# How many recent IDs to remember. This used to be 100, sized for when only
-# page 1 (~10 results/combo) was fetched. Since PAGES_PER_QUERY=2 roughly
-# doubled unique job churn per run, 100 was getting fully cycled out within
-# a couple of runs - a job dropped out of memory long before it actually
-# disappeared from LinkedIn's results, so it looked "new" again and got
-# re-sent as a duplicate. Sized generously here (a few thousand short numeric
-# IDs costs nothing meaningful in the state file) so memory comfortably
-# outlasts how long a posting stays visible, regardless of run frequency.
+
 RECENT_ID_CAP = 3000
 
 STATE_DIR = Path(__file__).parent / "state"
@@ -213,14 +204,10 @@ def is_too_old(date_str: str | None, max_age_days: int) -> bool:
     except ValueError:
         return False
     if posted.tzinfo is None:
-        # LinkedIn's search cards give a date only, e.g. "2026-08-09" - that
-        # parses as a naive datetime; treat it as UTC midnight rather than
-        # erroring on the subtraction below.
+      
         posted = posted.replace(tzinfo=timezone.utc)
     age = datetime.now(timezone.utc) - posted
-    # Compare the timedelta directly, not age.days - that property truncates
-    # to whole elapsed days, so "3 days and 1 hour old" would read as
-    # age.days == 3 and incorrectly pass a ">3 days" check.
+   
     return age > timedelta(days=max_age_days)
 
 
@@ -746,11 +733,7 @@ def run() -> None:
           f"{len(LOCATIONS)} location(s) x {len(KEYWORDS)} keyword(s)")
 
     if is_first_run:
-        # No history yet - unlike job_alert.py's Adzuna cursor (where the
-        # README tells you to manually pre-set last_seen_iso to avoid a
-        # first-run flood), just seed every currently-open matching posting
-        # as "already known" and send one confirmation instead. No scoring
-        # needed for a baseline run.
+       
         all_ids = [j["id"] for j in jobs]
         trimmed = all_ids[-RECENT_ID_CAP:] if len(all_ids) > RECENT_ID_CAP else all_ids
         save_state(STATE_FILE, {
