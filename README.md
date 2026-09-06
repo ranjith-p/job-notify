@@ -333,7 +333,7 @@ they're a bit different from Adzuna's:
 ## Tuning it
 
 - **Everything search-related** — keywords, exclusions, locations, match
-  threshold, and AI settings — lives in plain text files: `search_config.txt`
+  threshold, and AI settings, lives in plain text files: `search_config.txt`
   for Adzuna, `linkedin_search_config.txt` for LinkedIn. No code involved.
   Each setting sits under its own `[SECTION]` heading; add or remove lines
   to change it, lines starting with `#` are just comments. Commit and push
@@ -345,12 +345,12 @@ they're a bit different from Adzuna's:
   `CANDIDATE_PROFILE` secret from step 1c whenever your background or
   target roles change.
 - **How often it checks**: controlled by your two cron-job.org schedules,
-  not by anything in this repo — edit them there any time. Keeping them
+  not by anything in this repo, edit them there any time. Keeping them
   separate means you can, for example, check Adzuna every 10 minutes while
   keeping LinkedIn at once an hour.
 - **Making the repo public**: GitHub gives unlimited free automation
   minutes to public repos (private repos get a limited free monthly
-  quota). This is safe to do — your profile and every key are private
+  quota). This is safe to do, your profile and every key are private
   Secrets, never stored in the project's actual files — but it's worth a
   quick look through the repo's file list first, just to be sure nothing
   else personal ended up in there.
