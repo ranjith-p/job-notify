@@ -10,9 +10,6 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -211,9 +208,6 @@ def is_too_old(date_str: str | None, max_age_days: int) -> bool:
     return age > timedelta(days=max_age_days)
 
 
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
 
 def load_state(path: Path) -> dict:
     if path.exists():
@@ -229,9 +223,6 @@ def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-# ---------------------------------------------------------------------------
-# LinkedIn search + detail fetch (public "jobs-guest" endpoint, no auth)
-# ---------------------------------------------------------------------------
 
 def http_get_with_retry(url: str, max_retries: int = 3) -> requests.Response | None:
     """GET with a short retry/backoff on 429/5xx. Returns None (not raises) on
@@ -496,9 +487,6 @@ def enrich_description(job: dict) -> dict:
     return {"description": description, "german_context": german_context}
 
 
-# ---------------------------------------------------------------------------
-# Groq scoring - same prompt schema and retry strategy as job_alert.py
-# ---------------------------------------------------------------------------
 
 class GroqQuotaExhausted(Exception):
     """Raised instead of a generic HTTP error when Groq's rate limit is
