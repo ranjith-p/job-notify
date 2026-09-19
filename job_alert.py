@@ -8,7 +8,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
-
 import requests
 
 ADZUNA_APP_ID = os.environ["ADZUNA_APP_ID"]
