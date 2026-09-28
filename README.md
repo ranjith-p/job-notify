@@ -15,18 +15,18 @@ checking around the clock even when your own computer is switched off.
 No single job site has everything. This bot checks **two** sources every
 run, so a posting only has to appear on *one* of them to reach you:
 
-- **Adzuna** — not a job board itself, but a search engine that crawls and
+- **Adzuna** - not a job board itself, but a search engine that crawls and
   aggregates listings from thousands of other sources: company career
   pages, recruitment agencies, niche boards, and job sites across 16+
-  countries. Its strength is breadth — it catches postings you'd otherwise
+  countries. Its strength is breadth - it catches postings you'd otherwise
   only find by visiting dozens of individual company websites.
-- **LinkedIn** — the single largest destination for job postings overall,
+- **LinkedIn** - the single largest destination for job postings overall,
   and many companies post exclusively there without ever syndicating to
   aggregators like Adzuna. Its strength is postings Adzuna simply never
   sees.
 
 Run separately, each source has blind spots. Run together, they cover for
-each other — which is the whole point of building it this way rather than
+each other - which is the whole point of building it this way rather than
 picking just one. Both feed into the same Telegram chat, scored against
 the same profile, so you get one unified stream of relevant jobs regardless
 of which site they came from.
@@ -35,8 +35,8 @@ of which site they came from.
 
 ```mermaid
 flowchart TB
-    A1["⏰ Scheduled check — Adzuna"]
-    A2["⏰ Scheduled check — LinkedIn"]
+    A1["⏰ Scheduled check - Adzuna"]
+    A2["⏰ Scheduled check - LinkedIn"]
     A1 --> B["🔎 Search for matching jobs"]
     A2 --> B
     B --> C["🧹 Remove duplicates & unwanted titles"]
