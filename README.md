@@ -107,7 +107,7 @@ Every field is generated automatically. Title, company, location, and
 posting date come straight from the source. Salary shows only when
 Adzuna provides one. The match score, language requirement, and years of
 experience are all read by the AI directly from the *actual full job
-posting* — not just whatever short summary the source's listing page
+posting* - not just whatever short summary the source's listing page
 shows.
 
 ## Heads up on the first run
@@ -116,10 +116,10 @@ shows.
 currently matching job it finds, in one burst. After that, it only alerts
 on genuinely new postings. If you'd rather skip that initial flood, edit
 `state/combined.json` before your first run and set `last_seen_iso` to
-right now, e.g. `"2026-08-06T12:00:00Z"` — that makes the first run start
+right now, e.g. `"2026-08-06T12:00:00Z"` - that makes the first run start
 clean.
 
-**LinkedIn**: no action needed — its first run automatically recognizes
+**LinkedIn**: no action needed - its first run automatically recognizes
 it has no history, quietly records everything currently open as "already
 known," and sends you one short confirmation message instead of a flood.
 From the next run on, you'll only be alerted about genuinely new postings.
