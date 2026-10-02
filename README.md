@@ -82,8 +82,8 @@ experience aligns well with this role.
 https://www.adzuna.de/details/1234567890
 ```
 
-**From LinkedIn** (same idea, no salary field — LinkedIn's public listings
-don't reliably expose one — and the posting date has no time-of-day,
+**From LinkedIn** (same idea, no salary field - LinkedIn's public listings
+don't reliably expose one - and the posting date has no time-of-day,
 because LinkedIn's search results don't provide one):
 ```
 🔗 LinkedIn — New role
