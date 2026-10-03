@@ -700,10 +700,6 @@ def send_telegram(job: dict, match: dict) -> None:
     resp.raise_for_status()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def run() -> None:
     state = load_state(STATE_FILE)
     print(f"DEBUG loaded state from {STATE_FILE}: {state}")
@@ -815,9 +811,7 @@ def run() -> None:
             print(f"ERROR sending Telegram message for '{job['title']}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
-    # dict keys preserve insertion order, so this slice keeps the most
-    # recently-added RECENT_ID_CAP IDs (not an arbitrary batch - see the
-    # comment where recent_ids is built, above).
+
     all_recent = list(recent_ids.keys())
     trimmed = all_recent[-RECENT_ID_CAP:] if len(all_recent) > RECENT_ID_CAP else all_recent
 
