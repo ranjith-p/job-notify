@@ -1,11 +1,10 @@
-
 import html
 import json
 import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import requests
@@ -42,6 +41,17 @@ _DEFAULT_GROQ_CALL_PACING_SECONDS = 8
 _DEFAULT_MAX_JOBS_SCORED_PER_RUN = 60
 _DEFAULT_MAX_DESCRIPTION_CHARS = 2000
 
+_DEFAULT_REQUIRE_TITLE_TERMS = [
+    "data", "daten", "scientist", "science", "analytics", "analyst",
+    "datenanalyst", "datenanalystin", "datenanalytiker", "datenanalytikerin",
+    "datenanalytik", "datenwissenschaftler", "datenwissenschaftlerin",
+    "machine learning", "ml", "mlops", "ai", "ki", "artificial intelligence",
+    "künstliche intelligenz", "deep learning", "nlp", "llm", "genai",
+    "computer vision", "statistician", "statistics", "quantitative",
+    "modeling", "modelling",
+]
+
+
 
 def load_search_config(path: Path) -> dict:
     """
@@ -59,6 +69,7 @@ def load_search_config(path: Path) -> dict:
         "ADZUNA_LOCATIONS": [],
         "MIN_MATCH_SCORE": [],
         "ADZUNA_COUNTRY": [],
+        "ADZUNA_REQUIRE_TITLE_TERMS": [],
         "GROQ_MODEL": [],
         "GROQ_CALL_PACING_SECONDS": [],
         "MAX_JOBS_SCORED_PER_RUN": [],
@@ -92,6 +103,9 @@ def load_search_config(path: Path) -> dict:
     exclude_companies = result["EXCLUDE_COMPANIES"] or _DEFAULT_EXCLUDE_COMPANIES
     exclude_german_levels = [w.lower() for w in result["EXCLUDE_GERMAN_LEVELS"]] or _DEFAULT_EXCLUDE_GERMAN_LEVELS
     locations = result["ADZUNA_LOCATIONS"] or _DEFAULT_LOCATIONS
+    require_title_terms = result["ADZUNA_REQUIRE_TITLE_TERMS"] or _DEFAULT_REQUIRE_TITLE_TERMS
+    if [t.strip() for t in require_title_terms] == ["*"]:
+        require_title_terms = []  # explicit opt-out: gate disabled
 
     def _single_str(key: str, default: str) -> str:
         return result[key][0].strip() if result[key] else default
@@ -121,6 +135,7 @@ def load_search_config(path: Path) -> dict:
         "EXCLUDE_TITLES": exclude_titles,
         "EXCLUDE_COMPANIES": exclude_companies,
         "EXCLUDE_GERMAN_LEVELS": exclude_german_levels,
+        "REQUIRE_TITLE_TERMS": require_title_terms,
         "FETCH_LOCATIONS": fetch_locations,
         "MIN_MATCH_SCORE": min_match_score,
         "ADZUNA_COUNTRY": adzuna_country,
@@ -136,6 +151,7 @@ print(f"DEBUG loaded search config: keywords={_CONFIG['KEYWORDS']}, "
       f"exclude_titles={_CONFIG['EXCLUDE_TITLES']}, "
       f"exclude_companies={_CONFIG['EXCLUDE_COMPANIES']}, "
       f"exclude_german_levels={_CONFIG['EXCLUDE_GERMAN_LEVELS']}, "
+      f"require_title_terms={_CONFIG['REQUIRE_TITLE_TERMS'] or 'DISABLED'}, "
       f"locations={_CONFIG['FETCH_LOCATIONS']}, "
       f"min_match_score={_CONFIG['MIN_MATCH_SCORE']}, "
       f"adzuna_country={_CONFIG['ADZUNA_COUNTRY']}, "
@@ -163,6 +179,10 @@ _EXCLUDE_TITLE_RE = re.compile("|".join(EXCLUDE_TITLE_PATTERNS), re.IGNORECASE)
 
 EXCLUDE_COMPANY_PATTERNS = [rf"\b{re.escape(phrase)}\b" for phrase in _CONFIG["EXCLUDE_COMPANIES"]]
 _EXCLUDE_COMPANY_RE = re.compile("|".join(EXCLUDE_COMPANY_PATTERNS), re.IGNORECASE) if EXCLUDE_COMPANY_PATTERNS else None
+
+# Title relevance gate (see _DEFAULT_REQUIRE_TITLE_TERMS). None = disabled.
+_REQUIRE_TITLE_PATTERNS = [rf"\b{re.escape(t)}\b" for t in _CONFIG["REQUIRE_TITLE_TERMS"]]
+_REQUIRE_TITLE_RE = re.compile("|".join(_REQUIRE_TITLE_PATTERNS), re.IGNORECASE) if _REQUIRE_TITLE_PATTERNS else None
 
 
 RECENT_ID_CAP = 2000
@@ -561,6 +581,46 @@ def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
+class GroqQuotaExhausted(Exception):
+    """Raised when Groq's DAILY request budget is exhausted. Groq's free
+    tier is a small budget shared by everything using this API key
+    (this script AND linkedin_alert.py), so once it's gone every
+    remaining call this run would fail identically. run() stops scoring
+    for the rest of the run instead of burning retries on each job."""
+
+
+# --- Groq cooldown ---------------------------------------------------------
+# A previous version slept AFTER each job that passed the filters. Jobs
+# that were filtered out (German requirement / low score, i.e. most of
+# them) hit a `continue` first and skipped the sleep entirely, so the
+# next Groq call fired immediately: a burst of back-to-back calls that
+# blew through the per-minute token limit after the first one or two
+# jobs. The cooldown now lives here, in front of every single Groq
+# request regardless of how the previous job turned out, and measures
+# real elapsed time (so page-fetch time overlaps with the cooldown
+# instead of adding to it).
+_GROQ_COOLDOWN_MAX_SECONDS = 60
+_last_groq_call_at = float("-inf")
+_groq_cooldown_seconds = float(GROQ_CALL_PACING_SECONDS)
+
+
+def _groq_throttle() -> None:
+    global _last_groq_call_at
+    wait = _groq_cooldown_seconds - (time.monotonic() - _last_groq_call_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_groq_call_at = time.monotonic()
+
+
+# Hidden reasoning tokens count against the per-minute token budget on
+# gpt-oss models. "low" is plenty for extracting a score + two short
+# fields and leaves room for more scored jobs per minute. Groq rejects
+# this parameter (HTTP 400) on non-reasoning models, so it's dropped
+# automatically if that ever happens (e.g. GROQ_MODEL changed).
+_GROQ_REASONING_EFFORT = "low"
+_send_reasoning_effort = True
+
+
 def score_job_match(job: dict, description: str, german_context: str) -> dict:
     """
     Ask Groq to score how well this job matches the candidate profile,
@@ -632,28 +692,57 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
     }
+    global _send_reasoning_effort, _groq_cooldown_seconds
+    if _send_reasoning_effort:
+        request_body["reasoning_effort"] = _GROQ_REASONING_EFFORT
 
-
+    # Retry on rate limits (429), but cap how long we'll actually wait.
+    # Groq's Retry-After can suggest waits of many minutes when the token
+    # quota is exhausted; honoring that would tie up the whole run.
     max_attempts = 3
     max_retry_wait_seconds = 15
     resp = None
     for attempt in range(1, max_attempts + 1):
+        _groq_throttle()
         resp = requests.post(
             GROQ_API_URL,
             headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
             json=request_body,
             timeout=30,
         )
+
+        if resp.status_code == 400 and "reasoning_effort" in request_body \
+                and "reasoning" in (resp.text or "").lower():
+            # Model doesn't accept reasoning_effort: stop sending it.
+            _send_reasoning_effort = False
+            request_body.pop("reasoning_effort", None)
+            print("Groq rejected reasoning_effort for this model; "
+                  "retrying without it", file=sys.stderr)
+            continue
+
         if resp.status_code != 429:
             break
+
+        # x-ratelimit-remaining-requests is the DAILY (RPD) budget. A
+        # long Retry-After alone isn't proof of that (a normal per-minute
+        # refill can also suggest 15-30s+), so check the header.
+        if (resp.headers.get("x-ratelimit-remaining-requests") or "").strip() == "0":
+            reset = resp.headers.get("x-ratelimit-reset-requests", "unknown")
+            raise GroqQuotaExhausted(f"daily request quota exhausted, resets in {reset}")
+
+        # Per-minute limit: slow the rest of this run down instead of
+        # hammering at the same rate that just got us throttled.
+        _groq_cooldown_seconds = min(_groq_cooldown_seconds * 1.5, _GROQ_COOLDOWN_MAX_SECONDS)
         retry_after = float(resp.headers.get("Retry-After", 2 * attempt))
         if retry_after > max_retry_wait_seconds:
-            print(f"Groq rate-limited, suggested wait {retry_after}s exceeds "
-                  f"cap of {max_retry_wait_seconds}s — giving up on this "
-                  f"job's score rather than waiting", file=sys.stderr)
+            print(f"Groq rate-limited (per-minute), suggested wait {retry_after:.0f}s "
+                  f"exceeds {max_retry_wait_seconds}s cap; cooldown raised to "
+                  f"{_groq_cooldown_seconds:.0f}s, giving up on this job for now",
+                  file=sys.stderr)
             break
-        print(f"Groq rate-limited (attempt {attempt}/{max_attempts}), "
-              f"waiting {retry_after}s", file=sys.stderr)
+        print(f"Groq rate-limited (attempt {attempt}/{max_attempts}), waiting "
+              f"{retry_after}s; cooldown raised to {_groq_cooldown_seconds:.0f}s",
+              file=sys.stderr)
         time.sleep(retry_after)
 
     resp.raise_for_status()
@@ -698,14 +787,52 @@ def is_hard_german_requirement(german_requirement: str) -> bool:
     return any(word in text for word in _HARD_GERMAN_LEVEL_WORDS)
 
 
+def title_passes_gate(title: str) -> bool:
+    """True if the title contains at least one required term (or the gate
+    is disabled). Cheap local check that runs before any page fetch or
+    LLM call."""
+    return _REQUIRE_TITLE_RE is None or bool(_REQUIRE_TITLE_RE.search(title or ""))
+
+
+def job_fingerprint(job: dict) -> tuple | None:
+    """(title, company, location), normalized. The same posting is often
+    indexed under several Adzuna IDs (reposts, multiple feeds); those
+    share a fingerprint and only the first needs scoring/alerting."""
+    title = re.sub(r"\s+", " ", (job.get("title") or "").lower()).strip()
+    if not title:
+        return None
+    company = (job.get("company", {}).get("display_name") or "").lower().strip()
+    location = (job.get("location", {}).get("display_name") or "").lower().strip()
+    return (title, company, location)
+
+
+def _iso_minus_one_second(iso: str) -> str:
+    return (parse_iso(iso) - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# A job that can't be scored this run (rate limit, quota, per-run cap) is
+# deferred to the next run rather than sent blank. If it's still
+# unscorable after this many hours it's dropped, so one permanently
+# failing job can never hold the cursor back indefinitely.
+_DEFER_MAX_AGE_HOURS = 24
+# Stop calling Groq for the rest of the run after this many scoring
+# failures in a row (it's clearly throttled; the rest wait for next run).
+_MAX_CONSECUTIVE_SCORING_FAILURES = 3
+
+
 def run() -> None:
     state = load_state(STATE_FILE)
     print(f"DEBUG loaded state from {STATE_FILE}: {state}")
     last_seen = parse_iso(state["last_seen_iso"])
-
+    # Ordered list (oldest -> newest) for FIFO retention across runs, plus
+    # a set mirror for fast membership checks. recent_ids is the safety
+    # net for a source "bumping" a listing's timestamp (same ID, newer
+    # created date) so the time cursor alone would call it new again.
     recent_ids_list = list(state["recent_ids"])
     recent_ids_set = set(recent_ids_list)
 
+    # Fetch both scopes and merge into one deduped list, keyed by job id,
+    # so a Berlin job (which matches both queries) is processed once.
     all_jobs: dict[str, dict] = {}
     for location in FETCH_LOCATIONS:
         for job in fetch_jobs(location):
@@ -715,52 +842,104 @@ def run() -> None:
     jobs = list(all_jobs.values())
     print(f"DEBUG merged {len(jobs)} unique jobs across both scopes")
 
-    new_jobs = []
-    newest_iso = state["last_seen_iso"]
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Cursor bookkeeping. A job is RESOLVED once it reaches a final
+    # outcome (sent, filtered, excluded, duplicate): it's remembered and
+    # the cursor may move past it. A DEFERRED job has no outcome yet, so
+    # the cursor is held just before the earliest deferred job and it
+    # shows up as new again next run (the jobs resolved after it are
+    # skipped then via recent_ids).
+    resolved_cursor = state["last_seen_iso"]
+    deferred_floor: str | None = None
+    funnel = {"merged": len(jobs), "new": 0, "excluded": 0, "title_gate": 0,
+              "duplicate": 0, "groq_calls": 0, "scored": 0, "filtered": 0,
+              "sent": 0, "deferred": 0, "dropped_stale": 0}
 
+    def resolve(job: dict) -> None:
+        nonlocal resolved_cursor
+        job_id = str(job.get("id"))
+        if job_id not in recent_ids_set:
+            recent_ids_set.add(job_id)
+            recent_ids_list.append(job_id)
+        created = job.get("created", "")
+        # Clamp to "now": boards occasionally report bogus future 'created'
+        # timestamps; letting one poison the cursor would make genuinely
+        # new jobs look older than the cursor and get skipped forever.
+        if created > now_iso:
+            print(f"WARNING '{job.get('title')}' has a future-dated created "
+                  f"timestamp ({created}), not advancing cursor past it")
+        elif created > resolved_cursor:
+            resolved_cursor = created
+
+    def defer_or_drop(job: dict, why: str) -> None:
+        nonlocal deferred_floor
+        age = datetime.now(timezone.utc) - parse_iso(job["created"])
+        if age > timedelta(hours=_DEFER_MAX_AGE_HOURS):
+            print(f"Dropped (still unscored after {_DEFER_MAX_AGE_HOURS}h, "
+                  f"{why}): {job.get('title')}")
+            funnel["dropped_stale"] += 1
+            resolve(job)
+            return
+        funnel["deferred"] += 1
+        if deferred_floor is None or job["created"] < deferred_floor:
+            deferred_floor = job["created"]
+
+    # Stage 1: cheap local filters (no network, no LLM), oldest first.
+    candidates: list[dict] = []
+    seen_fingerprints: set = set()
     for job in sorted(jobs, key=lambda j: j.get("created", "")):
         job_id = str(job.get("id"))
         created = job.get("created", "")
         if not created or not job_id:
             continue
-        created_dt = parse_iso(created)
+        if not (parse_iso(created) > last_seen and job_id not in recent_ids_set):
+            continue
+        funnel["new"] += 1
 
-        is_new_by_time = created_dt > last_seen
-        is_new_by_id = job_id not in recent_ids_set
-
-        if is_new_by_time and is_new_by_id:
-            recent_ids_set.add(job_id)
-            recent_ids_list.append(job_id)
-
-            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            if created > newest_iso and created <= now_iso:
-                newest_iso = created
-            elif created > now_iso:
-                print(f"WARNING '{job.get('title')}' has a future-dated "
-                      f"created timestamp ({created}) — not advancing "
-                      f"cursor past it")
-
-            exclude_reason = should_exclude(job)
-            if exclude_reason:
-                print(f"Skipped ({exclude_reason}): {job.get('title')}")
-                continue
-
-            new_jobs.append(job)
-
-
-    to_send = []
-    for i, job in enumerate(new_jobs):
-        label = label_for_job(job)
-
-        if i >= MAX_JOBS_SCORED_PER_RUN:
-
-            print(f"Skipping score for '{job.get('title')}' — per-run "
-                  f"scoring cap ({MAX_JOBS_SCORED_PER_RUN}) reached")
-            match = {"match_score": None, "match_reason": "",
-                     "german_requirement": "Unknown", "years_experience": "Not mentioned"}
-            to_send.append((job, label, match))
+        exclude_reason = should_exclude(job)
+        if exclude_reason:
+            print(f"Skipped ({exclude_reason}): {job.get('title')}")
+            funnel["excluded"] += 1
+            resolve(job)
             continue
 
+        if not title_passes_gate(job.get("title", "")):
+            print(f"Skipped (title has none of the required terms): {job.get('title')}")
+            funnel["title_gate"] += 1
+            resolve(job)
+            continue
+
+        fingerprint = job_fingerprint(job)
+        if fingerprint is not None:
+            if fingerprint in seen_fingerprints:
+                print(f"Skipped (duplicate posting of one already queued this run): "
+                      f"{job.get('title')}")
+                funnel["duplicate"] += 1
+                resolve(job)
+                continue
+            seen_fingerprints.add(fingerprint)
+
+        candidates.append(job)
+
+    # Stage 2: fetch the full posting + score it with Groq. Only jobs that
+    # actually got scored are ever sent, so MIN_MATCH_SCORE is never
+    # bypassed by a job that merely failed to score.
+    to_send = []
+    stop_reason: str | None = None
+    consecutive_failures = 0
+    for job in candidates:
+        if stop_reason:
+            defer_or_drop(job, stop_reason)
+            continue
+        if funnel["groq_calls"] >= MAX_JOBS_SCORED_PER_RUN:
+            stop_reason = f"per-run scoring cap ({MAX_JOBS_SCORED_PER_RUN}) reached"
+            print(f"Deferring remaining jobs: {stop_reason}")
+            defer_or_drop(job, stop_reason)
+            continue
+
+        label = label_for_job(job)
+        # The page fetch happens before the cooldown wait inside
+        # score_job_match, so its time counts toward the cooldown.
         enriched = enrich_description(job)
         description = enriched["description"]
         german_context = enriched["german_context"]
@@ -768,32 +947,46 @@ def run() -> None:
               f"length {len(description)} chars, german_context "
               f"{'found (' + str(len(german_context)) + ' chars)' if german_context else 'NOT found'}")
 
+        funnel["groq_calls"] += 1
         try:
             match = score_job_match(job, description, german_context)
+        except GroqQuotaExhausted as exc:
+            stop_reason = f"Groq daily quota exhausted ({exc})"
+            print(f"WARNING {stop_reason}; deferring this and all remaining jobs "
+                  f"to the next run", file=sys.stderr)
+            defer_or_drop(job, stop_reason)
+            continue
         except Exception as exc:  # noqa: BLE001
-            # A scoring failure should never block the job from being sent
-            # or block state persistence — fall back to no score shown.
-            print(f"WARNING scoring failed for '{job.get('title')}': {exc}",
-                  file=sys.stderr)
-            match = {"match_score": None, "match_reason": "",
-                     "german_requirement": "Unknown", "years_experience": "Not mentioned"}
+            consecutive_failures += 1
+            print(f"WARNING scoring failed for '{job.get('title')}': {exc}; "
+                  f"deferring to next run", file=sys.stderr)
+            defer_or_drop(job, "scoring failed")
+            if consecutive_failures >= _MAX_CONSECUTIVE_SCORING_FAILURES:
+                stop_reason = f"{consecutive_failures} scoring failures in a row"
+                print(f"WARNING {stop_reason}; deferring the remaining jobs",
+                      file=sys.stderr)
+            continue
+
+        consecutive_failures = 0
+        funnel["scored"] += 1
+        resolve(job)
 
         if is_hard_german_requirement(match.get("german_requirement", "")):
             print(f"Skipped (requires {match.get('german_requirement')}): "
                   f"{job.get('title')}")
+            funnel["filtered"] += 1
             continue
 
         score = match.get("match_score")
         if score is not None and score < MIN_MATCH_SCORE:
             print(f"Skipped (match score {score} < {MIN_MATCH_SCORE}): "
                   f"{job.get('title')}")
+            funnel["filtered"] += 1
             continue
 
         to_send.append((job, label, match))
-        time.sleep(GROQ_CALL_PACING_SECONDS)
 
-    # Pass 2: send the batch header (now with an accurate count), then
-    # each job.
+    # Pass 2: batch header (accurate count), then each job.
     if to_send:
         try:
             send_batch_header(len(to_send))
@@ -804,25 +997,41 @@ def run() -> None:
     for job, label, match in to_send:
         try:
             send_telegram(label, job, match)
+            funnel["sent"] += 1
             print(f"Sent alert ({label}): {job.get('title')} "
                   f"(match={match.get('match_score')})")
         except Exception as exc:  # noqa: BLE001
-
+            # Never let one bad message crash the run: that would skip
+            # save_state() below and resend everything next run.
             print(f"ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
+    # Cursor: newest resolved job, but held back to just before the
+    # earliest deferred job so it's picked up again next run. Never
+    # moves backwards past where this run started.
+    final_cursor = resolved_cursor
+    if deferred_floor is not None:
+        pinned = _iso_minus_one_second(deferred_floor)
+        if pinned < final_cursor:
+            final_cursor = pinned
+    if final_cursor < state["last_seen_iso"]:
+        final_cursor = state["last_seen_iso"]
+
+    # FIFO trim: keep the most recently added IDs, independent of whether
+    # they appear in this run's fetch.
     trimmed = recent_ids_list[-RECENT_ID_CAP:]
 
     new_state = {
-        "last_seen_iso": newest_iso,
+        "last_seen_iso": final_cursor,
         "recent_ids": trimmed,
     }
+    print(f"DEBUG funnel: {funnel}")
     print(f"DEBUG about to write state: {new_state}")
     save_state(STATE_FILE, new_state)
     print(f"DEBUG state file now on disk: {STATE_FILE.read_text()}")
 
-    if not new_jobs:
+    if funnel["new"] == 0:
         print("No new jobs this run.")
 
 
