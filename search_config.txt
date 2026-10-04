@@ -74,6 +74,19 @@ wissenschaftliche mitarbeiterin
 wissenschaftlicher mitarbeiter
 wissenschaftliche mitarbeiter
 bachelor
+phd
+ph.d
+doctoral
+doctorate
+doktorand
+doktorandin
+doktoranden
+promotionsstelle
+promovend
+postdoc
+post-doc
+postdoctoral
+dissertation
 
 
 # ---------------------------------------------------------------------------
@@ -122,14 +135,17 @@ openai/gpt-oss-20b
 
 
 # ---------------------------------------------------------------------------
-# GROQ_CALL_PACING_SECONDS — seconds to wait between scoring calls, to
+# GROQ_CALL_PACING_SECONDS — minimum seconds between Groq scoring calls, to
 # stay within Groq's free-tier ~6,000-8,000 tokens/minute limit. Used by
-# both sources. Remember the daily quota is SHARED between both scripts —
-# loosening this for one source leaves less headroom for the other on a
-# busy day.
+# both sources. Adzuna enforces it as a true minimum gap between ANY two
+# Groq calls (including after jobs that get filtered out) and raises it
+# automatically for the rest of a run if Groq still rate-limits. Each
+# scoring call is roughly 1,700 tokens, so 25s is about 4,200 tokens/min.
+# Remember the quota is SHARED between both scripts, so loosening this for
+# one source leaves less headroom for the other.
 # ---------------------------------------------------------------------------
 [GROQ_CALL_PACING_SECONDS]
-20
+25
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +190,54 @@ de
 [ADZUNA_LOCATIONS]
 Germany
 Berlin
+
+
+# ---------------------------------------------------------------------------
+# ADZUNA_REQUIRE_TITLE_TERMS — a job's TITLE must contain at least one of
+# these (whole word/phrase, case-insensitive) or it is skipped BEFORE any
+# page fetch or Groq call. Adzuna's keyword search matches the title OR
+# the description, so a posting for an unrelated role that merely mentions
+# "data analyst" somewhere in its text comes back as a hit; this stops
+# those from using up your (small, shared) Groq budget or reaching you.
+# One per line. Put a single * on its own line to disable the gate.
+# Matching is exact, so list variants separately (e.g. both "analyst" and
+# "analytics"). Skipped titles are logged ("title has none of the required
+# terms") so you can see what it is dropping and add a term if needed.
+# German compounds are one word (e.g. "Datenanalyst"), so "daten" alone
+# does not match them; the common ones are listed explicitly below.
+# ---------------------------------------------------------------------------
+[ADZUNA_REQUIRE_TITLE_TERMS]
+data
+daten
+scientist
+science
+analytics
+analyst
+datenanalyst
+datenanalystin
+datenanalytiker
+datenanalytikerin
+datenanalytik
+datenwissenschaftler
+datenwissenschaftlerin
+machine learning
+ml
+mlops
+ai
+ki
+artificial intelligence
+künstliche intelligenz
+deep learning
+nlp
+llm
+genai
+computer vision
+statistician
+statistics
+quantitative
+modeling
+modelling
+
 
 
 # =============================================================================
