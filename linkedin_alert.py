@@ -74,6 +74,7 @@ def load_search_config(path: Path) -> dict:
         "MAX_DESCRIPTION_CHARS": [],
         "ADZUNA_COUNTRY": [],
         "ADZUNA_LOCATIONS": [],
+        "ADZUNA_REQUIRE_TITLE_TERMS": [],
         "LINKEDIN_LOCATIONS": [],
         "MAX_POSTING_AGE_DAYS": [],
         "PAGES_PER_QUERY": [],
