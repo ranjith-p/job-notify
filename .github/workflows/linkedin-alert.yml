@@ -66,32 +66,53 @@ jobs:
         run: |
           echo "--- state file on disk after script ran ---"
           cat state/linkedin.json
-          echo "--- git status before add ---"
-          git status
           git config user.name "linkedin-alert-bot"
           git config user.email "actions@github.com"
-          git add state/linkedin.json
-          echo "--- git status after add ---"
-          git status
-          echo "--- git diff --cached ---"
-          git diff --cached
-          if git diff --cached --quiet; then
-            echo "No state changes to commit."
-            exit 0
-          fi
-          git commit -m "Update LinkedIn alert state [skip ci]"
 
-          # Retry pull-rebase + push a few times in case another run's
-          # push (this workflow or job-alert.yml's) landed in the same
-          # narrow window.
-          for attempt in 1 2 3; do
-            if git pull --rebase origin main && git push; then
+          # Merge with whatever's currently on the remote at the JSON
+          # level (max timestamp, union of recent_ids) rather than
+          # relying on git's line-based rebase/merge — two runs can each
+          # append DIFFERENT new job IDs to the same array, which git's
+          # text merge sees as a genuine conflict (it has no idea this
+          # is just "two sets of additions"). A stuck rebase conflict on
+          # the Adzuna side previously left state updates lost entirely,
+          # since a simple retry loop had no way to recover from a
+          # half-applied rebase — same fix applied here for consistency,
+          # even though this workflow's own concurrency group makes a
+          # same-workflow race less likely than it was for job-alert.yml.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+
+            if git show origin/main:state/linkedin.json > /tmp/remote_state.json 2>/dev/null; then
+              python3 merge_state.py /tmp/remote_state.json state/linkedin.json /tmp/merged_state.json 3000
+            else
+              cp state/linkedin.json /tmp/merged_state.json
+            fi
+
+            # Catch local HEAD up to the actual current remote tip —
+            # this is what makes the next commit a legitimate
+            # fast-forward instead of racing a moving target.
+            git reset --hard origin/main
+            cp /tmp/merged_state.json state/linkedin.json
+
+            echo "--- merged state (attempt $attempt) ---"
+            cat state/linkedin.json
+
+            git add state/linkedin.json
+            if git diff --cached --quiet; then
+              echo "No state changes to commit."
+              exit 0
+            fi
+            git commit -m "Update LinkedIn alert state [skip ci]"
+
+            if git push origin HEAD:main; then
               echo "Push succeeded on attempt $attempt."
               exit 0
             fi
-            echo "Push attempt $attempt failed, retrying..."
+
+            echo "Push attempt $attempt failed (remote moved again) — retrying with fresh merge..."
             sleep $((attempt * 5))
           done
 
-          echo "Push failed after 3 attempts."
+          echo "Push failed after 5 attempts."
           exit 1
