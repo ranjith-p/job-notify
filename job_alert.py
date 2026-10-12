@@ -40,9 +40,16 @@ _DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 _DEFAULT_GROQ_CALL_PACING_SECONDS = 8
 _DEFAULT_MAX_JOBS_SCORED_PER_RUN = 60
 _DEFAULT_MAX_DESCRIPTION_CHARS = 2000
-
+# A job's TITLE must contain at least one of these (whole word/phrase,
+# case-insensitive) to be worth spending an LLM call on. Adzuna's
+# what_phrase search matches the title OR the description, so a "Sales
+# Manager" posting that merely mentions "data analyst" somewhere in its
+# text comes back as a hit. Overridden by [ADZUNA_REQUIRE_TITLE_TERMS]
+# in search_config.txt ("*" there disables the gate).
 _DEFAULT_REQUIRE_TITLE_TERMS = [
     "data", "daten", "scientist", "science", "analytics", "analyst",
+    # German compounds are a single word, so "daten" alone never matches
+    # inside them; they have to be listed explicitly.
     "datenanalyst", "datenanalystin", "datenanalytiker", "datenanalytikerin",
     "datenanalytik", "datenwissenschaftler", "datenwissenschaftlerin",
     "machine learning", "ml", "mlops", "ai", "ki", "artificial intelligence",
@@ -379,36 +386,78 @@ def _extract_relevant_window(text: str, anchor_idx: int, total_budget: int) -> s
     return f"{head}\n...\n{tail}"
 
 
-_GERMAN_MENTION_RE = re.compile(r"\b(german|deutsch\w*)\b", re.IGNORECASE)
+# "Deutschland" (the country, company names like "DIS AG Deutschland") must
+# NOT count as a language mention: it used to fill the 5 excerpt slots and
+# push the real "fluent German" sentence out of the excerpts.
+_GERMAN_MENTION_RE = re.compile(r"\b(german|deutsch(?!land)\w*)\b", re.IGNORECASE)
+
+# Wording that makes a German mention a hard requirement / a soft one.
+_GERMAN_STRONG_RE = re.compile(
+    r"(fluent|fluency|flie(?:ss|ß)end|verhandlungssicher|business[- ]fluent|"
+    r"native|muttersprach\w*|\bc1\b|\bc2\b|sehr gute|sehr guten|"
+    r"excellent|very good|strong|proficien\w*|perfekt\w*|"
+    r"gute[nr]? deutsch|required|erforderlich|vorausgesetzt|"
+    r"must|mandatory|zwingend)", re.IGNORECASE)
+_GERMAN_SOFT_RE = re.compile(
+    r"(\bplus\b|ideal\w*|nice[- ]to[- ]have|von vorteil|w(?:ü|ue)nschenswert|"
+    r"advantage|desirable|beneficial|preferred|\bor english\b|"
+    r"\bgerman and/or english\b)", re.IGNORECASE)
 
 
-def extract_german_mentions(text: str, context_chars: int = 150, max_mentions: int = 5) -> str:
+def _german_windows(text: str, context_chars: int):
+    """Merged (start, end) windows around every German/Deutsch mention."""
+    wins = []
+    for m in _GERMAN_MENTION_RE.finditer(text):
+        st, en = max(0, m.start() - context_chars), min(len(text), m.end() + context_chars)
+        if wins and st <= wins[-1][1]:
+            wins[-1] = (wins[-1][0], max(wins[-1][1], en))
+        else:
+            wins.append((st, en))
+    return wins
+
+
+def extract_german_mentions(text: str, context_chars: int = 150, max_mentions: int = 6) -> str:
     """
-    Scan text for any mention of 'German'/'Deutsch' and return the
-    surrounding context for each occurrence, deduplicated. This is plain
-    local regex scanning — zero LLM token cost — so it's run on the
-    FULL fetched page text, not the token-budget-limited description
-    window. That means a language requirement can never be missed due
-    to truncation, regardless of where in a long posting it appears.
-    Only the small extracted excerpts (not the whole page) get sent to
-    Groq afterward, for a much cheaper and more reliable check than
-    asking the model to find it within the whole JD itself.
+    Scan text for any mention of 'German'/'Deutsch' (not 'Deutschland') and
+    return the surrounding context, overlapping windows merged. Plain local
+    regex, zero LLM cost, run on the FULL fetched page text. Excerpts that
+    contain requirement wording (fluent, C1, required, ...) are ranked first,
+    so a hard requirement can never be cut off by the max_mentions limit.
     """
     if not text:
         return ""
-    mentions = []
-    seen_spans = set()
-    for match in _GERMAN_MENTION_RE.finditer(text):
-        start = max(0, match.start() - context_chars)
-        end = min(len(text), match.end() + context_chars)
-        span_key = (start // 50, end // 50)  # coarse dedupe of overlapping windows
-        if span_key in seen_spans:
+    excerpts = [text[st:en].strip() for st, en in _german_windows(text, context_chars)]
+    excerpts.sort(key=lambda e: 0 if _GERMAN_STRONG_RE.search(e) else 1)  # stable
+    return "\n---\n".join(excerpts[:max_mentions])
+
+
+def detect_hard_german(text: str, before: int = 60, after: int = 40) -> str:
+    """
+    Deterministic cross-check of the LLM's German verdict. Returns the
+    matching phrase if a German mention sits next to strong requirement
+    wording (fluent, verhandlungssicher, C1, ...) and is not softened.
+
+    Softening wording only counts when it PRECEDES the mention or follows
+    it in the same clause. A soft phrase that ends in a colon after the
+    mention ("Von Vorteil, aber kein Muss:") is the heading of the NEXT
+    bullet list and must not soften the German bullet before it. That
+    exact layout fooled both the LLM and the first version of this check.
+    """
+    for m in _GERMAN_MENTION_RE.finditer(text or ""):
+        pre = text[max(0, m.start() - before): m.start()]
+        post = text[m.end(): m.end() + after]
+        strong = _GERMAN_STRONG_RE.search(pre[-40:] + " " + m.group(0) + " " + post)
+        if not strong:
             continue
-        seen_spans.add(span_key)
-        mentions.append(text[start:end].strip())
-        if len(mentions) >= max_mentions:
-            break
-    return "\n---\n".join(mentions)
+        soft_pre = _GERMAN_SOFT_RE.search(pre)
+        soft_post = None
+        for sm in _GERMAN_SOFT_RE.finditer(post):
+            if ":" not in post[sm.end(): sm.end() + 25]:   # not a heading
+                soft_post = sm
+                break
+        if not soft_pre and not soft_post:
+            return " ".join((pre + m.group(0) + post).split())
+    return ""
 
 
 def enrich_description(job: dict) -> dict:
@@ -668,6 +717,11 @@ def score_job_match(job: dict, description: str, german_context: str) -> dict:
         "those excerpts are the authoritative, complete set of every "
         "German mention found anywhere in the full posting). Use exactly "
         "one of these forms:\n"
+        "- A phrase ending in a colon such as 'Von Vorteil, aber kein Muss:' "
+        "or 'Nice to have:' is the HEADING of the list that FOLLOWS it. It "
+        "never qualifies a requirement that appears before it.\n"
+        "- If SEVERAL excerpts disagree, report the STRICTEST one: any "
+        "excerpt saying German is required/fluent/C1 beats a 'plus' elsewhere.\n"
         "- 'Not mentioned' — if told no mention was found.\n"
         "- 'Mentioned as a plus, not required' — German is explicitly named "
         "as optional/nice-to-have/ideal-but-not-required (e.g. 'ideally "
@@ -970,6 +1024,15 @@ def run() -> None:
         consecutive_failures = 0
         funnel["scored"] += 1
         resolve(job)
+
+        # Safety net: the small model sometimes reports "plus" although a
+        # mention clearly says fluent/required. Trust the local check.
+        if not is_hard_german_requirement(match.get("german_requirement", "")):
+            hard = detect_hard_german(german_context)
+            if hard:
+                print(f"DEBUG German override for '{job.get('title')}': LLM said "
+                      f"'{match.get('german_requirement')}' but text says: ...{hard}...")
+                match["german_requirement"] = "Fluent German required"
 
         if is_hard_german_requirement(match.get("german_requirement", "")):
             print(f"Skipped (requires {match.get('german_requirement')}): "
