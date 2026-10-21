@@ -1068,6 +1068,18 @@ def run() -> None:
             # save_state() below and resend everything next run.
             print(f"ERROR sending Telegram message for "
                   f"'{job.get('title')}': {exc}", file=sys.stderr)
+        # Persist after EVERY alert, not only at the end. If the run is
+        # cancelled, times out or crashes mid-way, the alerts already
+        # sent are on disk (the workflow commits state even on failure)
+        # and are not sent a second time by the next run. The cursor
+        # stays at its old value here; recent_ids alone prevents repeats.
+        try:
+            save_state(STATE_FILE, {
+                "last_seen_iso": state["last_seen_iso"],
+                "recent_ids": recent_ids_list[-RECENT_ID_CAP:],
+            })
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING incremental state save failed: {exc}", file=sys.stderr)
         time.sleep(0.3)  # be polite to Telegram's rate limits
 
     # Cursor: newest resolved job, but held back to just before the
