@@ -53,6 +53,7 @@ jobs:
 
       - name: Run job alert script
         if: steps.hours.outputs.active == 'true'
+        timeout-minutes: 25  # step-level, so the commit step below still runs
         env:
           ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
           ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
@@ -63,7 +64,9 @@ jobs:
         run: python job_alert.py
 
       - name: Commit updated state
-        if: steps.hours.outputs.active == 'true'
+        # always(): commit state even if the script step failed or timed
+        # out after sending alerts, otherwise they are re-sent next run.
+        if: always() && steps.hours.outputs.active == 'true'
         run: |
           echo "--- state file on disk after script ran ---"
           cat state/combined.json
